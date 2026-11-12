@@ -154,4 +154,4 @@ Ideas, criticism, pointers to papers or tools, and code are all welcome. Please 
 
 ## Licence
 
-No licence has been chosen yet for the project's own code. The libraries under `standalone/vendor/` keep their own licences, which are included there.
+The project's own code is under the MIT licence. See `LICENSE`. The libraries under `standalone/vendor/` keep their own licences, which are included there.
