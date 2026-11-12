@@ -1,0 +1,5 @@
+⟦paper-copy 1.2 source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa uses=pcl/1.2⟧⟦page 1⟧⟦line 1⟧Before.
+⟦line 2⟧⟦float id=T1 kind=table basis=map ref=float:t1⟧Table
+⟦line 3⟧Note⟦/float⟧
+⟦page 2⟧⟦line 4⟧⟦heading level=2 basis=map ref=outline:h⟧Title⟦/heading⟧
+⟦line 5⟧Body.

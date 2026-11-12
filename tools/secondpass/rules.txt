@@ -1,0 +1,16 @@
+# Second-pass rules: number, module, mode, error family.
+# mode "list": its items also go into the copy's "Places the program is not sure of" list.
+# mode "report": its items are written to copy.secondpass.json only (not yet precise enough to list).
+# Modes are set from the evaluation on the audited AG/AH/AI copies (tools/secondpass/EVALUATION.md):
+# rules 2 and 5 left items on papers audited error-free, so they report only.
+1  r01_ink         list    text loss: printed words on the page image in no copied or furniture line
+2  r02_continuity  report  a sentence that stops: a paragraph ending mid-sentence not followed by its continuation
+3  r03_foreign     list    foreign text inside a sentence: running head, folio, caption, footnote or lettering between its halves
+4  r04_order       list    reading order: body lines out of the page's column order
+5  r05_headings    report  headings: numbering out of sequence, a heading after its text, references before their heading
+6  r06_references  list    references: numbering gaps or fused entries, citations without a reference
+7  r07_tables      list    tables: printed rows merged in one grid row, a word outside its column
+8  r08_duplicates  list    duplicates: a block printed twice that the PDF prints once
+9  r09_glyphs      list    characters: a Latin letter claimed for a Greek or sign outline
+10 r10_page1       list    page 1: title not the largest text, authors and affiliation markers disagree, page-1 lines unaccounted
+11 r11_kind        list    document kind: submission form, margin line numbers, tracked changes, several articles

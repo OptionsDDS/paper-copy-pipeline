@@ -1,0 +1,1 @@
+1:120: error: invalid code point 'u+27e6' for char (expected uppercase U+XXXX with 4 to 6 hex digits)

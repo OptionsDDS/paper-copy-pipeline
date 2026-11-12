@@ -1,0 +1,216 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 4
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 4,
+      "reading_start": 0,
+      "reading_end": 3,
+      "furniture": false
+    },
+    {
+      "line": 2,
+      "page": 1,
+      "printed_start": 5,
+      "printed_end": 11,
+      "reading_start": 7,
+      "reading_end": 14,
+      "furniture": false
+    },
+    {
+      "line": 3,
+      "page": 1,
+      "printed_start": 12,
+      "printed_end": 17,
+      "reading_start": 14,
+      "reading_end": 20,
+      "furniture": false
+    },
+    {
+      "line": 4,
+      "page": 1,
+      "printed_start": 18,
+      "printed_end": 22,
+      "reading_start": 3,
+      "reading_end": 7,
+      "furniture": false
+    }
+  ],
+  "spans": [
+    {
+      "name": "float",
+      "start": 8,
+      "end": 20,
+      "start_line": 2,
+      "end_line": 3
+    }
+  ],
+  "wraps": [
+    {
+      "line": 4,
+      "hyphen": "remove",
+      "basis": "review",
+      "ref": "review:join",
+      "reading_offset": 3,
+      "from": 1,
+      "removed": "U+002D",
+      "removed_reading": "-"
+    }
+  ],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [],
+  "float_spans": [
+    {
+      "id": "sample",
+      "kind": "table",
+      "basis": "map",
+      "ref": "map:sample",
+      "start": 8,
+      "end": 20,
+      "start_line": 2,
+      "end_line": 3
+    }
+  ],
+  "reading_map": [
+    {
+      "char": "s",
+      "line": 1,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": "u",
+      "line": 1,
+      "column": 1,
+      "offset": 1
+    },
+    {
+      "char": "n",
+      "line": 1,
+      "column": 2,
+      "offset": 2
+    },
+    {
+      "char": "r",
+      "line": 4,
+      "column": 0,
+      "offset": 3
+    },
+    {
+      "char": "i",
+      "line": 4,
+      "column": 1,
+      "offset": 4
+    },
+    {
+      "char": "s",
+      "line": 4,
+      "column": 2,
+      "offset": 5
+    },
+    {
+      "char": "e",
+      "line": 4,
+      "column": 3,
+      "offset": 6
+    },
+    {
+      "char": "\n",
+      "derived": "float",
+      "line": 2,
+      "offset": 7
+    },
+    {
+      "char": "C",
+      "line": 2,
+      "column": 0,
+      "offset": 8
+    },
+    {
+      "char": "o",
+      "line": 2,
+      "column": 1,
+      "offset": 9
+    },
+    {
+      "char": "p",
+      "line": 2,
+      "column": 2,
+      "offset": 10
+    },
+    {
+      "char": "p",
+      "line": 2,
+      "column": 3,
+      "offset": 11
+    },
+    {
+      "char": "e",
+      "line": 2,
+      "column": 4,
+      "offset": 12
+    },
+    {
+      "char": "r",
+      "line": 2,
+      "column": 5,
+      "offset": 13
+    },
+    {
+      "char": " ",
+      "derived": "line-break",
+      "after_line": 2,
+      "offset": 14
+    },
+    {
+      "char": "C",
+      "line": 3,
+      "column": 0,
+      "offset": 15
+    },
+    {
+      "char": "e",
+      "line": 3,
+      "column": 1,
+      "offset": 16
+    },
+    {
+      "char": "l",
+      "line": 3,
+      "column": 2,
+      "offset": 17
+    },
+    {
+      "char": "l",
+      "line": 3,
+      "column": 3,
+      "offset": 18
+    },
+    {
+      "char": "s",
+      "line": 3,
+      "column": 4,
+      "offset": 19
+    }
+  ]
+}

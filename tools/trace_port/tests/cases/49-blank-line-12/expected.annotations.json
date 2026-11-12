@@ -1,0 +1,76 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "0000000000000000000000000000000000000000000000000000000000000000",
+    "uses": [
+      "pcl/1.2",
+      "test/1.0"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 3
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 1,
+      "reading_start": 0,
+      "reading_end": 1,
+      "furniture": false
+    },
+    {
+      "line": 2,
+      "page": 1,
+      "printed_start": 2,
+      "printed_end": 2,
+      "reading_start": 1,
+      "reading_end": 1,
+      "furniture": false
+    },
+    {
+      "line": 3,
+      "page": 1,
+      "printed_start": 3,
+      "printed_end": 4,
+      "reading_start": 1,
+      "reading_end": 3,
+      "furniture": false
+    }
+  ],
+  "spans": [],
+  "wraps": [],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [],
+  "float_spans": [],
+  "reading_map": [
+    {
+      "char": "A",
+      "line": 1,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": " ",
+      "derived": "line-break",
+      "after_line": 1,
+      "offset": 1
+    },
+    {
+      "char": "B",
+      "line": 3,
+      "column": 0,
+      "offset": 2
+    }
+  ]
+}

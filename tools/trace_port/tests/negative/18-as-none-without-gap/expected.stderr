@@ -1,0 +1,1 @@
+1:132: error: glyph 'as=none' requires a 'gap=<em>' or 'gap=edge' argument, as in ⟦glyph U+XXXX as=none rule=<name/version> gap=-0.009⟧

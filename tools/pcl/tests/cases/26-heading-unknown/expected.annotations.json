@@ -1,0 +1,153 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 1
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 16,
+      "reading_start": 0,
+      "reading_end": 16,
+      "furniture": false
+    }
+  ],
+  "spans": [
+    {
+      "name": "heading",
+      "start": 0,
+      "end": 16,
+      "start_line": 1,
+      "end_line": 1
+    }
+  ],
+  "wraps": [],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [
+    {
+      "level": null,
+      "basis": "map",
+      "ref": "outline:h",
+      "start": 0,
+      "end": 16,
+      "start_line": 1,
+      "end_line": 1
+    }
+  ],
+  "float_spans": [],
+  "reading_map": [
+    {
+      "char": "A",
+      "line": 1,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": "c",
+      "line": 1,
+      "column": 1,
+      "offset": 1
+    },
+    {
+      "char": "k",
+      "line": 1,
+      "column": 2,
+      "offset": 2
+    },
+    {
+      "char": "n",
+      "line": 1,
+      "column": 3,
+      "offset": 3
+    },
+    {
+      "char": "o",
+      "line": 1,
+      "column": 4,
+      "offset": 4
+    },
+    {
+      "char": "w",
+      "line": 1,
+      "column": 5,
+      "offset": 5
+    },
+    {
+      "char": "l",
+      "line": 1,
+      "column": 6,
+      "offset": 6
+    },
+    {
+      "char": "e",
+      "line": 1,
+      "column": 7,
+      "offset": 7
+    },
+    {
+      "char": "d",
+      "line": 1,
+      "column": 8,
+      "offset": 8
+    },
+    {
+      "char": "g",
+      "line": 1,
+      "column": 9,
+      "offset": 9
+    },
+    {
+      "char": "e",
+      "line": 1,
+      "column": 10,
+      "offset": 10
+    },
+    {
+      "char": "m",
+      "line": 1,
+      "column": 11,
+      "offset": 11
+    },
+    {
+      "char": "e",
+      "line": 1,
+      "column": 12,
+      "offset": 12
+    },
+    {
+      "char": "n",
+      "line": 1,
+      "column": 13,
+      "offset": 13
+    },
+    {
+      "char": "t",
+      "line": 1,
+      "column": 14,
+      "offset": 14
+    },
+    {
+      "char": "s",
+      "line": 1,
+      "column": 15,
+      "offset": 15
+    }
+  ]
+}

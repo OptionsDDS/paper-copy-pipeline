@@ -1,0 +1,260 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 2
+    },
+    {
+      "page": 2,
+      "first_line": 3,
+      "last_line": 3
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 3,
+      "reading_start": 0,
+      "reading_end": 2,
+      "furniture": false
+    },
+    {
+      "line": 2,
+      "page": 1,
+      "printed_start": 4,
+      "printed_end": 9,
+      "reading_start": 22,
+      "reading_end": 28,
+      "furniture": false
+    },
+    {
+      "line": 3,
+      "page": 2,
+      "printed_start": 10,
+      "printed_end": 30,
+      "reading_start": 2,
+      "reading_end": 22,
+      "furniture": false
+    }
+  ],
+  "spans": [
+    {
+      "name": "float",
+      "start": 23,
+      "end": 28,
+      "start_line": 2,
+      "end_line": 2
+    }
+  ],
+  "wraps": [
+    {
+      "line": 3,
+      "hyphen": "remove",
+      "basis": "witness",
+      "ref": "word",
+      "reading_offset": 2,
+      "from": 1,
+      "removed": "U+002D",
+      "removed_reading": "-"
+    }
+  ],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [],
+  "float_spans": [
+    {
+      "id": "T1",
+      "kind": "table",
+      "basis": "map",
+      "ref": "float:t1",
+      "start": 23,
+      "end": 28,
+      "start_line": 2,
+      "end_line": 2
+    }
+  ],
+  "reading_map": [
+    {
+      "char": "i",
+      "line": 1,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": "m",
+      "line": 1,
+      "column": 1,
+      "offset": 1
+    },
+    {
+      "char": "m",
+      "line": 3,
+      "column": 0,
+      "offset": 2
+    },
+    {
+      "char": "u",
+      "line": 3,
+      "column": 1,
+      "offset": 3
+    },
+    {
+      "char": "n",
+      "line": 3,
+      "column": 2,
+      "offset": 4
+    },
+    {
+      "char": "o",
+      "line": 3,
+      "column": 3,
+      "offset": 5
+    },
+    {
+      "char": "l",
+      "line": 3,
+      "column": 4,
+      "offset": 6
+    },
+    {
+      "char": "o",
+      "line": 3,
+      "column": 5,
+      "offset": 7
+    },
+    {
+      "char": "g",
+      "line": 3,
+      "column": 6,
+      "offset": 8
+    },
+    {
+      "char": "i",
+      "line": 3,
+      "column": 7,
+      "offset": 9
+    },
+    {
+      "char": "c",
+      "line": 3,
+      "column": 8,
+      "offset": 10
+    },
+    {
+      "char": "a",
+      "line": 3,
+      "column": 9,
+      "offset": 11
+    },
+    {
+      "char": "l",
+      "line": 3,
+      "column": 10,
+      "offset": 12
+    },
+    {
+      "char": " ",
+      "line": 3,
+      "column": 11,
+      "offset": 13
+    },
+    {
+      "char": "r",
+      "line": 3,
+      "column": 12,
+      "offset": 14
+    },
+    {
+      "char": "e",
+      "line": 3,
+      "column": 13,
+      "offset": 15
+    },
+    {
+      "char": "s",
+      "line": 3,
+      "column": 14,
+      "offset": 16
+    },
+    {
+      "char": "u",
+      "line": 3,
+      "column": 15,
+      "offset": 17
+    },
+    {
+      "char": "l",
+      "line": 3,
+      "column": 16,
+      "offset": 18
+    },
+    {
+      "char": "t",
+      "line": 3,
+      "column": 17,
+      "offset": 19
+    },
+    {
+      "char": "s",
+      "line": 3,
+      "column": 18,
+      "offset": 20
+    },
+    {
+      "char": ".",
+      "line": 3,
+      "column": 19,
+      "offset": 21
+    },
+    {
+      "char": "\n",
+      "derived": "float",
+      "line": 2,
+      "offset": 22
+    },
+    {
+      "char": "T",
+      "line": 2,
+      "column": 0,
+      "offset": 23
+    },
+    {
+      "char": "a",
+      "line": 2,
+      "column": 1,
+      "offset": 24
+    },
+    {
+      "char": "b",
+      "line": 2,
+      "column": 2,
+      "offset": 25
+    },
+    {
+      "char": "l",
+      "line": 2,
+      "column": 3,
+      "offset": 26
+    },
+    {
+      "char": "e",
+      "line": 2,
+      "column": 4,
+      "offset": 27
+    }
+  ]
+}

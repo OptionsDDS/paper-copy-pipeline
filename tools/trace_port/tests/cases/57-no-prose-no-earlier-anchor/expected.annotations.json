@@ -1,0 +1,270 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 1
+    },
+    {
+      "page": 2,
+      "first_line": 2,
+      "last_line": 2
+    },
+    {
+      "page": 3,
+      "first_line": 3,
+      "last_line": 4
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 12,
+      "reading_start": 0,
+      "reading_end": 0,
+      "furniture": true
+    },
+    {
+      "line": 2,
+      "page": 2,
+      "printed_start": 13,
+      "printed_end": 25,
+      "reading_start": 0,
+      "reading_end": 12,
+      "furniture": false
+    },
+    {
+      "line": 3,
+      "page": 3,
+      "printed_start": 26,
+      "printed_end": 31,
+      "reading_start": 12,
+      "reading_end": 18,
+      "furniture": false
+    },
+    {
+      "line": 4,
+      "page": 3,
+      "printed_start": 32,
+      "printed_end": 37,
+      "reading_start": 18,
+      "reading_end": 24,
+      "furniture": false
+    }
+  ],
+  "spans": [
+    {
+      "name": "furniture",
+      "start": 0,
+      "end": 0,
+      "start_line": 1,
+      "end_line": 1
+    },
+    {
+      "name": "float",
+      "start": 0,
+      "end": 12,
+      "start_line": 2,
+      "end_line": 2
+    },
+    {
+      "name": "heading",
+      "start": 13,
+      "end": 18,
+      "start_line": 3,
+      "end_line": 3
+    }
+  ],
+  "wraps": [],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [
+    {
+      "start_line": 1,
+      "end_line": 1,
+      "reading_offset": 0,
+      "printed_text": "Front matter"
+    }
+  ],
+  "headings": [
+    {
+      "level": 1,
+      "basis": "map",
+      "ref": "outline:title",
+      "start": 13,
+      "end": 18,
+      "start_line": 3,
+      "end_line": 3
+    }
+  ],
+  "float_spans": [
+    {
+      "id": "sample",
+      "kind": "table",
+      "basis": "map",
+      "ref": "map:sample",
+      "start": 0,
+      "end": 12,
+      "start_line": 2,
+      "end_line": 2
+    }
+  ],
+  "reading_map": [
+    {
+      "char": "O",
+      "line": 2,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": "p",
+      "line": 2,
+      "column": 1,
+      "offset": 1
+    },
+    {
+      "char": "e",
+      "line": 2,
+      "column": 2,
+      "offset": 2
+    },
+    {
+      "char": "n",
+      "line": 2,
+      "column": 3,
+      "offset": 3
+    },
+    {
+      "char": "i",
+      "line": 2,
+      "column": 4,
+      "offset": 4
+    },
+    {
+      "char": "n",
+      "line": 2,
+      "column": 5,
+      "offset": 5
+    },
+    {
+      "char": "g",
+      "line": 2,
+      "column": 6,
+      "offset": 6
+    },
+    {
+      "char": " ",
+      "line": 2,
+      "column": 7,
+      "offset": 7
+    },
+    {
+      "char": "n",
+      "line": 2,
+      "column": 8,
+      "offset": 8
+    },
+    {
+      "char": "o",
+      "line": 2,
+      "column": 9,
+      "offset": 9
+    },
+    {
+      "char": "t",
+      "line": 2,
+      "column": 10,
+      "offset": 10
+    },
+    {
+      "char": "e",
+      "line": 2,
+      "column": 11,
+      "offset": 11
+    },
+    {
+      "char": "\n",
+      "derived": "heading",
+      "line": 3,
+      "offset": 12
+    },
+    {
+      "char": "T",
+      "line": 3,
+      "column": 0,
+      "offset": 13
+    },
+    {
+      "char": "i",
+      "line": 3,
+      "column": 1,
+      "offset": 14
+    },
+    {
+      "char": "t",
+      "line": 3,
+      "column": 2,
+      "offset": 15
+    },
+    {
+      "char": "l",
+      "line": 3,
+      "column": 3,
+      "offset": 16
+    },
+    {
+      "char": "e",
+      "line": 3,
+      "column": 4,
+      "offset": 17
+    },
+    {
+      "char": "\n",
+      "derived": "heading",
+      "line": 3,
+      "offset": 18
+    },
+    {
+      "char": "B",
+      "line": 4,
+      "column": 0,
+      "offset": 19
+    },
+    {
+      "char": "o",
+      "line": 4,
+      "column": 1,
+      "offset": 20
+    },
+    {
+      "char": "d",
+      "line": 4,
+      "column": 2,
+      "offset": 21
+    },
+    {
+      "char": "y",
+      "line": 4,
+      "column": 3,
+      "offset": 22
+    },
+    {
+      "char": ".",
+      "line": 4,
+      "column": 4,
+      "offset": 23
+    }
+  ]
+}

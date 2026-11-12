@@ -1,0 +1,5 @@
+⟦paper-copy 1.2 source=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb uses=pcl/1.2⟧⟦page 1⟧⟦line 1⟧Lead.
+⟦line 2⟧⟦float id=sample kind=table basis=map ref=map:sample⟧First block⟦/float⟧
+⟦page 2⟧⟦line 3⟧⟦float id=sample kind=table basis=map ref=map:sample⟧Second block⟦/float⟧
+⟦page 3⟧⟦line 4⟧⟦float id=sample kind=table basis=map ref=map:sample⟧Third block⟦/float⟧
+⟦page 4⟧⟦line 5⟧Tail.

@@ -1,0 +1,183 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 3
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 5,
+      "reading_start": 0,
+      "reading_end": 5,
+      "furniture": false
+    },
+    {
+      "line": 2,
+      "page": 1,
+      "printed_start": 6,
+      "printed_end": 10,
+      "reading_start": 5,
+      "reading_end": 10,
+      "furniture": false
+    },
+    {
+      "line": 3,
+      "page": 1,
+      "printed_start": 11,
+      "printed_end": 15,
+      "reading_start": 10,
+      "reading_end": 15,
+      "furniture": false
+    }
+  ],
+  "spans": [
+    {
+      "name": "float",
+      "start": 6,
+      "end": 10,
+      "start_line": 2,
+      "end_line": 2
+    },
+    {
+      "name": "float",
+      "start": 11,
+      "end": 15,
+      "start_line": 3,
+      "end_line": 3
+    }
+  ],
+  "wraps": [],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [],
+  "float_spans": [
+    {
+      "id": "T1",
+      "kind": "figure",
+      "basis": "map",
+      "ref": "float:t1",
+      "start": 6,
+      "end": 10,
+      "start_line": 2,
+      "end_line": 2
+    },
+    {
+      "id": "T1",
+      "kind": "note",
+      "basis": "map",
+      "ref": "float:t1",
+      "start": 11,
+      "end": 15,
+      "start_line": 3,
+      "end_line": 3
+    }
+  ],
+  "reading_map": [
+    {
+      "char": "B",
+      "line": 1,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": "o",
+      "line": 1,
+      "column": 1,
+      "offset": 1
+    },
+    {
+      "char": "d",
+      "line": 1,
+      "column": 2,
+      "offset": 2
+    },
+    {
+      "char": "y",
+      "line": 1,
+      "column": 3,
+      "offset": 3
+    },
+    {
+      "char": ".",
+      "line": 1,
+      "column": 4,
+      "offset": 4
+    },
+    {
+      "char": "\n",
+      "derived": "float",
+      "line": 2,
+      "offset": 5
+    },
+    {
+      "char": "A",
+      "line": 2,
+      "column": 0,
+      "offset": 6
+    },
+    {
+      "char": "x",
+      "line": 2,
+      "column": 1,
+      "offset": 7
+    },
+    {
+      "char": "i",
+      "line": 2,
+      "column": 2,
+      "offset": 8
+    },
+    {
+      "char": "s",
+      "line": 2,
+      "column": 3,
+      "offset": 9
+    },
+    {
+      "char": "\n",
+      "derived": "float",
+      "line": 3,
+      "offset": 10
+    },
+    {
+      "char": "N",
+      "line": 3,
+      "column": 0,
+      "offset": 11
+    },
+    {
+      "char": "o",
+      "line": 3,
+      "column": 1,
+      "offset": 12
+    },
+    {
+      "char": "t",
+      "line": 3,
+      "column": 2,
+      "offset": 13
+    },
+    {
+      "char": "e",
+      "line": 3,
+      "column": 3,
+      "offset": 14
+    }
+  ]
+}

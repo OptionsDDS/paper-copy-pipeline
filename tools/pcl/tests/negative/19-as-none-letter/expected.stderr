@@ -1,0 +1,1 @@
+1:119: error: glyph as=none is only allowed for whitespace or control code points (Unicode categories Zs, Cc, Cf); U+0041 has category Lu

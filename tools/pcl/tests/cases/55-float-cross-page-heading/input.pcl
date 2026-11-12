@@ -1,0 +1,4 @@
+⟦paper-copy 1.2 source=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb uses=pcl/1.2⟧⟦page 1⟧⟦line 1⟧⟦float id=sample kind=note basis=map ref=map:sample⟧Early note⟦/float⟧
+⟦line 2⟧⟦heading level=1 basis=map ref=outline:title⟧A cross-page
+⟦page 2⟧⟦line 3⟧heading⟦/heading⟧
+⟦line 4⟧Body.

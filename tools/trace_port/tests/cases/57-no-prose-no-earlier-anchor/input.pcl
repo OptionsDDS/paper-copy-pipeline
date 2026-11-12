@@ -1,0 +1,4 @@
+⟦paper-copy 1.2 source=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb uses=pcl/1.2⟧⟦page 1⟧⟦line 1⟧⟦furniture⟧Front matter⟦/furniture⟧
+⟦page 2⟧⟦line 2⟧⟦float id=sample kind=table basis=map ref=map:sample⟧Opening note⟦/float⟧
+⟦page 3⟧⟦line 3⟧⟦heading level=1 basis=map ref=outline:title⟧Title⟦/heading⟧
+⟦line 4⟧Body.

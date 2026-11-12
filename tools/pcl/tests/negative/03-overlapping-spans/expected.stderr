@@ -1,0 +1,1 @@
+1:134: error: span '/italic' would overlap the open span 'bold' (spans must nest, not overlap)

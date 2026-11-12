@@ -1,0 +1,19 @@
+Vendored code for element_boxer_sc.py: copied unmodified from dev-inputs/vendor-src (staged by the operator, no network).
+Every copied file's sha256 is in SHA256SUMS here and equals its line in dev-inputs/vendor-src/SHA256SUMS (433 of 433 checked).
+The 'files sha256' below is the sha256 of the SHA256SUMS lines of that folder, sorted by path.
+
+folder                             name                         version   licence files  files sha256      source
+pdfminer                           pdfminer.six                 20260107  MIT       182  119f34f51c1853e1  dev-inputs/vendor-src/pdfminer, licence in pdfminer_six-20260107.dist-info/licenses/LICENSE
+pdfminer_six-20260107.dist-info    pdfminer.six metadata        20260107  MIT         7  64215192157ca0ab  dev-inputs/vendor-src/pdfminer_six-20260107.dist-info
+pdfplumber                         pdfplumber                   0.11.10   MIT        21  6266ca0a24a09043  dev-inputs/vendor-src/pdfplumber, licence in pdfplumber-0.11.10.dist-info/licenses/LICENSE.txt
+pdfplumber-0.11.10.dist-info       pdfplumber metadata          0.11.10   MIT         8  2c462804376defd6  dev-inputs/vendor-src/pdfplumber-0.11.10.dist-info
+fontTools                          fontTools (subset)           4.67.0    MIT       207  0bc199571100c140  dev-inputs/vendor-src/fonttools-4.67.0/Lib/fontTools; the static import closure of ttLib (all tables), cffLib, t1Lib and pens/boundsPen (fontTools-SUBSET.txt)
+fontTools-4.67.0.licenses          fontTools licences           4.67.0    MIT         2  28174b507d064c92  dev-inputs/vendor-src/fonttools-4.67.0/LICENSE, LICENSE.external
+pyaes                              pyaes                        1.6.1     MIT         4  db621d9955cc010f  dev-inputs/vendor-src/pyaes-1.6.1/pyaes
+pyaes-1.6.1.licenses               pyaes licence and metadata   1.6.1     MIT         2  271e9eb29e835717  dev-inputs/vendor-src/pyaes-1.6.1/LICENSE.txt, PKG-INFO
+
+Patches (applied in memory at import by element_boxer_sc.py's loader; the copied files are not changed):
+  patches/pdfminer-utils.patch        pdfminer/utils.py: charset_normalizer (not vendored) made optional; make_compat_str falls back to str()
+  patches/pdfminer-pdfdocument.patch  pdfminer/pdfdocument.py: the cryptography AES-CBC calls (decrypt_aes128, authenticate R5/R6 OE/UE, _aes_cbc_encrypt, decrypt_aes256) replaced by vendored pyaes
+
+Not vendored: cryptography, charset_normalizer (pdfminer), Pillow and pypdfium2 (pdfplumber's optional display module, never imported here), PLAYA (read as a design reference only, not copied).

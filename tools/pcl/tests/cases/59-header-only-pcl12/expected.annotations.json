@@ -1,0 +1,22 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [],
+  "lines": [],
+  "spans": [],
+  "wraps": [],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [],
+  "float_spans": [],
+  "reading_map": []
+}

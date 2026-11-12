@@ -1,0 +1,139 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 2
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 5,
+      "reading_start": 0,
+      "reading_end": 5,
+      "furniture": false
+    },
+    {
+      "line": 2,
+      "page": 1,
+      "printed_start": 6,
+      "printed_end": 12,
+      "reading_start": 5,
+      "reading_end": 12,
+      "furniture": false
+    }
+  ],
+  "spans": [
+    {
+      "name": "float",
+      "start": 0,
+      "end": 12,
+      "start_line": 1,
+      "end_line": 2
+    }
+  ],
+  "wraps": [],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [],
+  "float_spans": [
+    {
+      "id": "T1",
+      "kind": "table",
+      "basis": "map",
+      "ref": "float:t1",
+      "start": 0,
+      "end": 12,
+      "start_line": 1,
+      "end_line": 2
+    }
+  ],
+  "reading_map": [
+    {
+      "char": "F",
+      "line": 1,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": "i",
+      "line": 1,
+      "column": 1,
+      "offset": 1
+    },
+    {
+      "char": "r",
+      "line": 1,
+      "column": 2,
+      "offset": 2
+    },
+    {
+      "char": "s",
+      "line": 1,
+      "column": 3,
+      "offset": 3
+    },
+    {
+      "char": "t",
+      "line": 1,
+      "column": 4,
+      "offset": 4
+    },
+    {
+      "char": " ",
+      "derived": "line-break",
+      "after_line": 1,
+      "offset": 5
+    },
+    {
+      "char": "S",
+      "line": 2,
+      "column": 0,
+      "offset": 6
+    },
+    {
+      "char": "e",
+      "line": 2,
+      "column": 1,
+      "offset": 7
+    },
+    {
+      "char": "c",
+      "line": 2,
+      "column": 2,
+      "offset": 8
+    },
+    {
+      "char": "o",
+      "line": 2,
+      "column": 3,
+      "offset": 9
+    },
+    {
+      "char": "n",
+      "line": 2,
+      "column": 4,
+      "offset": 10
+    },
+    {
+      "char": "d",
+      "line": 2,
+      "column": 5,
+      "offset": 11
+    }
+  ]
+}

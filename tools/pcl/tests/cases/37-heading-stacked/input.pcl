@@ -1,0 +1,5 @@
+⟦paper-copy 1.2 source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa uses=pcl/1.2⟧⟦page 1⟧⟦line 1⟧Before
+⟦line 2⟧⟦heading level=2 basis=map ref=outline:h⟧First⟦/heading⟧
+⟦line 3⟧⟦heading level=2 basis=review ref=outline:h⟧Second⟦/heading⟧
+⟦line 4⟧⟦furniture⟧Folio⟦/furniture⟧
+⟦line 5⟧After

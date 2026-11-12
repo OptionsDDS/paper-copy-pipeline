@@ -1,0 +1,140 @@
+{
+  "pcl": "1.0",
+  "header": {
+    "version": "1.0",
+    "source": "a34c2bd93c1aac1057cb59fa906fb3dc9899a2df33f43ae9d6f65a8f8a3730d4",
+    "uses": [
+      "pcl/1.0"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 1
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 15,
+      "reading_start": 0,
+      "reading_end": 15,
+      "furniture": false
+    }
+  ],
+  "spans": [],
+  "wraps": [],
+  "glyphs": [
+    {
+      "line": 1,
+      "column": 12,
+      "printed": "U+25E6",
+      "as": [
+        "U+00B0"
+      ],
+      "rule": "raised-mark/1.0",
+      "reading_start": 12,
+      "reading_end": 13
+    }
+  ],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "reading_map": [
+    {
+      "offset": 0,
+      "char": "S",
+      "line": 1,
+      "column": 0
+    },
+    {
+      "offset": 1,
+      "char": "t",
+      "line": 1,
+      "column": 1
+    },
+    {
+      "offset": 2,
+      "char": "o",
+      "line": 1,
+      "column": 2
+    },
+    {
+      "offset": 3,
+      "char": "r",
+      "line": 1,
+      "column": 3
+    },
+    {
+      "offset": 4,
+      "char": "e",
+      "line": 1,
+      "column": 4
+    },
+    {
+      "offset": 5,
+      "char": "d",
+      "line": 1,
+      "column": 5
+    },
+    {
+      "offset": 6,
+      "char": " ",
+      "line": 1,
+      "column": 6
+    },
+    {
+      "offset": 7,
+      "char": "a",
+      "line": 1,
+      "column": 7
+    },
+    {
+      "offset": 8,
+      "char": "t",
+      "line": 1,
+      "column": 8
+    },
+    {
+      "offset": 9,
+      "char": " ",
+      "line": 1,
+      "column": 9
+    },
+    {
+      "offset": 10,
+      "char": "4",
+      "line": 1,
+      "column": 10
+    },
+    {
+      "offset": 11,
+      "char": " ",
+      "line": 1,
+      "column": 11
+    },
+    {
+      "offset": 12,
+      "char": "°",
+      "line": 1,
+      "column": 12,
+      "substituted": "U+25E6"
+    },
+    {
+      "offset": 13,
+      "char": "C",
+      "line": 1,
+      "column": 13
+    },
+    {
+      "offset": 14,
+      "char": ".",
+      "line": 1,
+      "column": 14
+    }
+  ]
+}

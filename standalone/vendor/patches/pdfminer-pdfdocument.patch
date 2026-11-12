@@ -1,0 +1,83 @@
+--- a/pdfminer/pdfdocument.py	2026-10-18 01:53:22.065607087 -0400
++++ b/pdfminer/pdfdocument.py	2026-10-18 02:24:42.042102321 -0400
+@@ -10,8 +10,17 @@
+     cast,
+ )
+ 
+-from cryptography.hazmat.backends import default_backend
+-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
++import pyaes  # element_boxer_sc patch: AES-CBC from vendored pure-Python pyaes in place of cryptography
++
++
++def _sc_aes_cbc(key: bytes, iv: bytes, data: bytes, decrypt: bool) -> bytes:
++    """element_boxer_sc patch: AES-CBC over the whole 16-byte blocks of data, no padding added or removed
++    (what cryptography's update() returned here)."""
++    mode = pyaes.AESModeOfOperationCBC(bytes(key), iv=bytes(iv))
++    out = bytearray()
++    for i in range(0, len(data) - len(data) % 16, 16):
++        out += mode.decrypt(bytes(data[i:i + 16])) if decrypt else mode.encrypt(bytes(data[i:i + 16]))
++    return bytes(out)
+ 
+ from pdfminer import settings
+ from pdfminer.arcfour import Arcfour
+@@ -536,12 +545,7 @@
+         key = hash.digest()[: min(len(key), 16)]
+         initialization_vector = data[:16]
+         ciphertext = data[16:]
+-        cipher = Cipher(
+-            algorithms.AES(key),
+-            modes.CBC(initialization_vector),
+-            backend=default_backend(),
+-        )  # type: ignore
+-        plaintext = cipher.decryptor().update(ciphertext)  # type: ignore
++        plaintext = _sc_aes_cbc(key, initialization_vector, ciphertext, True)  # element_boxer_sc patch
+         return unpad_aes(plaintext)
+ 
+ 
+@@ -571,21 +575,11 @@
+         hash = self._password_hash(password_b, self.o_validation_salt, self.u)
+         if hash == self.o_hash:
+             hash = self._password_hash(password_b, self.o_key_salt, self.u)
+-            cipher = Cipher(
+-                algorithms.AES(hash),
+-                modes.CBC(b"\0" * 16),
+-                backend=default_backend(),
+-            )  # type: ignore
+-            return cipher.decryptor().update(self.oe)  # type: ignore
++            return _sc_aes_cbc(hash, b"\0" * 16, self.oe, True)  # element_boxer_sc patch
+         hash = self._password_hash(password_b, self.u_validation_salt)
+         if hash == self.u_hash:
+             hash = self._password_hash(password_b, self.u_key_salt)
+-            cipher = Cipher(
+-                algorithms.AES(hash),
+-                modes.CBC(b"\0" * 16),
+-                backend=default_backend(),
+-            )  # type: ignore
+-            return cipher.decryptor().update(self.ue)  # type: ignore
++            return _sc_aes_cbc(hash, b"\0" * 16, self.ue, True)  # element_boxer_sc patch
+         return None
+ 
+     def _normalize_password(self, password: str) -> bytes:
+@@ -653,20 +647,13 @@
+         return sum(b % 3 for b in input_bytes) % 3
+ 
+     def _aes_cbc_encrypt(self, key: bytes, iv: bytes, data: bytes) -> bytes:
+-        cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+-        encryptor = cipher.encryptor()  # type: ignore
+-        return encryptor.update(data) + encryptor.finalize()  # type: ignore
++        return _sc_aes_cbc(key, iv, data, False)  # element_boxer_sc patch
+ 
+     def decrypt_aes256(self, objid: int, genno: int, data: bytes) -> bytes:
+         initialization_vector = data[:16]
+         ciphertext = data[16:]
+         assert self.key is not None
+-        cipher = Cipher(
+-            algorithms.AES(self.key),
+-            modes.CBC(initialization_vector),
+-            backend=default_backend(),
+-        )  # type: ignore
+-        plaintext = cipher.decryptor().update(ciphertext)  # type: ignore
++        plaintext = _sc_aes_cbc(self.key, initialization_vector, ciphertext, True)  # element_boxer_sc patch
+         return unpad_aes(plaintext)
+ 
+ 

@@ -1,0 +1,260 @@
+{
+  "pcl": "1.0",
+  "header": {
+    "version": "1.0",
+    "source": "a34c2bd93c1aac1057cb59fa906fb3dc9899a2df33f43ae9d6f65a8f8a3730d4",
+    "uses": [
+      "pcl/1.0"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 2
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 18,
+      "reading_start": 0,
+      "reading_end": 17,
+      "furniture": false
+    },
+    {
+      "line": 2,
+      "page": 1,
+      "printed_start": 19,
+      "printed_end": 36,
+      "reading_start": 17,
+      "reading_end": 34,
+      "furniture": false
+    }
+  ],
+  "spans": [],
+  "wraps": [
+    {
+      "line": 2,
+      "hyphen": "remove",
+      "basis": "witness",
+      "ref": "medicina-p01-l11",
+      "reading_offset": 17,
+      "removed": "U+002D",
+      "removed_reading": "-"
+    }
+  ],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "reading_map": [
+    {
+      "offset": 0,
+      "char": "W",
+      "line": 1,
+      "column": 0
+    },
+    {
+      "offset": 1,
+      "char": "e",
+      "line": 1,
+      "column": 1
+    },
+    {
+      "offset": 2,
+      "char": " ",
+      "line": 1,
+      "column": 2
+    },
+    {
+      "offset": 3,
+      "char": "s",
+      "line": 1,
+      "column": 3
+    },
+    {
+      "offset": 4,
+      "char": "t",
+      "line": 1,
+      "column": 4
+    },
+    {
+      "offset": 5,
+      "char": "u",
+      "line": 1,
+      "column": 5
+    },
+    {
+      "offset": 6,
+      "char": "d",
+      "line": 1,
+      "column": 6
+    },
+    {
+      "offset": 7,
+      "char": "i",
+      "line": 1,
+      "column": 7
+    },
+    {
+      "offset": 8,
+      "char": "e",
+      "line": 1,
+      "column": 8
+    },
+    {
+      "offset": 9,
+      "char": "d",
+      "line": 1,
+      "column": 9
+    },
+    {
+      "offset": 10,
+      "char": " ",
+      "line": 1,
+      "column": 10
+    },
+    {
+      "offset": 11,
+      "char": "t",
+      "line": 1,
+      "column": 11
+    },
+    {
+      "offset": 12,
+      "char": "h",
+      "line": 1,
+      "column": 12
+    },
+    {
+      "offset": 13,
+      "char": "e",
+      "line": 1,
+      "column": 13
+    },
+    {
+      "offset": 14,
+      "char": " ",
+      "line": 1,
+      "column": 14
+    },
+    {
+      "offset": 15,
+      "char": "m",
+      "line": 1,
+      "column": 15
+    },
+    {
+      "offset": 16,
+      "char": "i",
+      "line": 1,
+      "column": 16
+    },
+    {
+      "offset": 17,
+      "char": "c",
+      "line": 2,
+      "column": 0
+    },
+    {
+      "offset": 18,
+      "char": "r",
+      "line": 2,
+      "column": 1
+    },
+    {
+      "offset": 19,
+      "char": "o",
+      "line": 2,
+      "column": 2
+    },
+    {
+      "offset": 20,
+      "char": "b",
+      "line": 2,
+      "column": 3
+    },
+    {
+      "offset": 21,
+      "char": "i",
+      "line": 2,
+      "column": 4
+    },
+    {
+      "offset": 22,
+      "char": "o",
+      "line": 2,
+      "column": 5
+    },
+    {
+      "offset": 23,
+      "char": "t",
+      "line": 2,
+      "column": 6
+    },
+    {
+      "offset": 24,
+      "char": "a",
+      "line": 2,
+      "column": 7
+    },
+    {
+      "offset": 25,
+      "char": " ",
+      "line": 2,
+      "column": 8
+    },
+    {
+      "offset": 26,
+      "char": "b",
+      "line": 2,
+      "column": 9
+    },
+    {
+      "offset": 27,
+      "char": "a",
+      "line": 2,
+      "column": 10
+    },
+    {
+      "offset": 28,
+      "char": "l",
+      "line": 2,
+      "column": 11
+    },
+    {
+      "offset": 29,
+      "char": "a",
+      "line": 2,
+      "column": 12
+    },
+    {
+      "offset": 30,
+      "char": "n",
+      "line": 2,
+      "column": 13
+    },
+    {
+      "offset": 31,
+      "char": "c",
+      "line": 2,
+      "column": 14
+    },
+    {
+      "offset": 32,
+      "char": "e",
+      "line": 2,
+      "column": 15
+    },
+    {
+      "offset": 33,
+      "char": ".",
+      "line": 2,
+      "column": 16
+    }
+  ]
+}

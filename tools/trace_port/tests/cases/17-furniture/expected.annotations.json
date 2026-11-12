@@ -1,0 +1,211 @@
+{
+  "pcl": "1.1",
+  "header": {
+    "version": "1.1",
+    "source": "a34c2bd93c1aac1057cb59fa906fb3dc9899a2df33f43ae9d6f65a8f8a3730d4",
+    "uses": [
+      "pcl/1.1",
+      "furniture/1.0"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 3
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 32,
+      "reading_start": 0,
+      "reading_end": 0,
+      "furniture": true
+    },
+    {
+      "line": 2,
+      "page": 1,
+      "printed_start": 33,
+      "printed_end": 50,
+      "reading_start": 0,
+      "reading_end": 20,
+      "furniture": false
+    },
+    {
+      "line": 3,
+      "page": 1,
+      "printed_start": 51,
+      "printed_end": 57,
+      "reading_start": 20,
+      "reading_end": 20,
+      "furniture": true
+    }
+  ],
+  "spans": [
+    {
+      "name": "furniture",
+      "start": 0,
+      "end": 0,
+      "start_line": 1,
+      "end_line": 1
+    },
+    {
+      "name": "sup",
+      "start": 17,
+      "end": 18,
+      "start_line": 2,
+      "end_line": 2
+    },
+    {
+      "name": "furniture",
+      "start": 20,
+      "end": 20,
+      "start_line": 3,
+      "end_line": 3
+    }
+  ],
+  "wraps": [],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [
+    {
+      "start_line": 1,
+      "end_line": 1,
+      "reading_offset": 0,
+      "printed_text": "Journal of Examples 2026, 3 of 9"
+    },
+    {
+      "start_line": 3,
+      "end_line": 3,
+      "reading_offset": 20,
+      "printed_text": "page 3"
+    }
+  ],
+  "reading_map": [
+    {
+      "offset": 0,
+      "char": "B",
+      "line": 2,
+      "column": 0
+    },
+    {
+      "offset": 1,
+      "char": "o",
+      "line": 2,
+      "column": 1
+    },
+    {
+      "offset": 2,
+      "char": "d",
+      "line": 2,
+      "column": 2
+    },
+    {
+      "offset": 3,
+      "char": "y",
+      "line": 2,
+      "column": 3
+    },
+    {
+      "offset": 4,
+      "char": " ",
+      "line": 2,
+      "column": 4
+    },
+    {
+      "offset": 5,
+      "char": "t",
+      "line": 2,
+      "column": 5
+    },
+    {
+      "offset": 6,
+      "char": "e",
+      "line": 2,
+      "column": 6
+    },
+    {
+      "offset": 7,
+      "char": "x",
+      "line": 2,
+      "column": 7
+    },
+    {
+      "offset": 8,
+      "char": "t",
+      "line": 2,
+      "column": 8
+    },
+    {
+      "offset": 9,
+      "char": " ",
+      "line": 2,
+      "column": 9
+    },
+    {
+      "offset": 10,
+      "char": "w",
+      "line": 2,
+      "column": 10
+    },
+    {
+      "offset": 11,
+      "char": "i",
+      "line": 2,
+      "column": 11
+    },
+    {
+      "offset": 12,
+      "char": "t",
+      "line": 2,
+      "column": 12
+    },
+    {
+      "offset": 13,
+      "char": "h",
+      "line": 2,
+      "column": 13
+    },
+    {
+      "offset": 14,
+      "char": " ",
+      "line": 2,
+      "column": 14
+    },
+    {
+      "offset": 15,
+      "char": "^",
+      "derived": "sup-open",
+      "line": 2
+    },
+    {
+      "offset": 16,
+      "char": "{",
+      "derived": "sup-open",
+      "line": 2
+    },
+    {
+      "offset": 17,
+      "char": "9",
+      "line": 2,
+      "column": 15
+    },
+    {
+      "offset": 18,
+      "char": "}",
+      "derived": "sup-close",
+      "line": 2
+    },
+    {
+      "offset": 19,
+      "char": ".",
+      "line": 2,
+      "column": 16
+    }
+  ]
+}

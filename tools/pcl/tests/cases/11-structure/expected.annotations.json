@@ -1,0 +1,123 @@
+{
+  "pcl": "1.0",
+  "header": {
+    "version": "1.0",
+    "source": "a34c2bd93c1aac1057cb59fa906fb3dc9899a2df33f43ae9d6f65a8f8a3730d4",
+    "uses": [
+      "pcl/1.0"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 1
+    },
+    {
+      "page": 2,
+      "first_line": 2,
+      "last_line": 2
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 2,
+      "reading_start": 0,
+      "reading_end": 2,
+      "furniture": false
+    },
+    {
+      "line": 2,
+      "page": 2,
+      "printed_start": 3,
+      "printed_end": 9,
+      "reading_start": 2,
+      "reading_end": 9,
+      "furniture": false
+    }
+  ],
+  "spans": [],
+  "wraps": [],
+  "glyphs": [],
+  "floats": [
+    {
+      "kind": "table",
+      "id": "T1",
+      "line": 2,
+      "reading_offset": 4
+    },
+    {
+      "kind": "figure",
+      "id": "F1",
+      "line": 2,
+      "reading_offset": 7
+    }
+  ],
+  "paras": [
+    {
+      "line": 2,
+      "reading_offset": 2
+    }
+  ],
+  "gaps": [],
+  "furniture": [],
+  "reading_map": [
+    {
+      "offset": 0,
+      "char": "A",
+      "line": 1,
+      "column": 0
+    },
+    {
+      "offset": 1,
+      "char": ".",
+      "line": 1,
+      "column": 1
+    },
+    {
+      "offset": 2,
+      "char": "\n",
+      "derived": "para",
+      "line": 2
+    },
+    {
+      "offset": 3,
+      "char": "B",
+      "line": 2,
+      "column": 0
+    },
+    {
+      "offset": 4,
+      "char": " ",
+      "line": 2,
+      "column": 1
+    },
+    {
+      "offset": 5,
+      "char": "C",
+      "line": 2,
+      "column": 2
+    },
+    {
+      "offset": 6,
+      "char": " ",
+      "line": 2,
+      "column": 3
+    },
+    {
+      "offset": 7,
+      "char": "D",
+      "line": 2,
+      "column": 4
+    },
+    {
+      "offset": 8,
+      "char": ".",
+      "line": 2,
+      "column": 5
+    }
+  ]
+}

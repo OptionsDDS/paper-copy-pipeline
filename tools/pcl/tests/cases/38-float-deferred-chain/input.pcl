@@ -1,0 +1,4 @@
+⟦paper-copy 1.2 source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa uses=pcl/1.2⟧⟦page 1⟧⟦line 1⟧im-
+⟦line 2⟧⟦float id=T1 kind=table basis=map ref=float:t1⟧Table⟦/float⟧
+⟦page 2⟧⟦line 3⟧⟦wrap 3 from=1 hyphen=remove basis=witness ref=word⟧muno-
+⟦page 3⟧⟦line 4⟧⟦wrap 4 hyphen=remove basis=witness ref=word⟧logical.

@@ -1,0 +1,1 @@
+2:9: error: wrap hyphen=remove: the previous printed line's hyphen is not its last reading character (it is inside a notation span or substituted by a glyph), which cannot be represented

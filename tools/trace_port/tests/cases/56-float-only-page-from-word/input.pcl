@@ -1,0 +1,5 @@
+⟦paper-copy 1.2 source=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb uses=pcl/1.2⟧⟦page 1⟧⟦line 1⟧an-
+⟦page 2⟧⟦line 2⟧⟦float id=sample kind=table basis=map ref=map:sample⟧Middle
+⟦line 3⟧note⟦/float⟧
+⟦page 3⟧⟦line 4⟧⟦wrap 4 from=1 hyphen=remove basis=review ref=review:join⟧other
+⟦line 5⟧Body.

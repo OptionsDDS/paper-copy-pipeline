@@ -1,0 +1,23 @@
+--- a/pdfminer/utils.py	2026-10-18 01:53:22.065578573 -0400
++++ b/pdfminer/utils.py	2026-10-18 01:53:22.071594013 -0400
+@@ -23,7 +23,10 @@
+ 
+ import contextlib
+ 
+-import charset_normalizer  # For str encoding detection
++try:  # element_boxer_sc patch: charset_normalizer is not vendored
++    import charset_normalizer  # For str encoding detection
++except ImportError:
++    charset_normalizer = None
+ 
+ # from sys import maxint as INF doesn't work anymore under Python3, but PDF
+ # still uses 32 bits ints
+@@ -68,6 +71,8 @@
+ def make_compat_str(o: object) -> str:
+     """Converts everything to string, if bytes guessing the encoding."""
+     if isinstance(o, bytes):
++        if charset_normalizer is None:  # element_boxer_sc patch
++            return str(o)
+         enc = charset_normalizer.detect(o)
+         if enc["encoding"] is None:
+             return str(o)

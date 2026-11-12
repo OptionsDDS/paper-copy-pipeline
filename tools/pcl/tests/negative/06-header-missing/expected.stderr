@@ -1,0 +1,1 @@
+1:1: error: missing header: the first instruction must be ⟦paper-copy 1.2 source=<sha256> uses=<rule/version,...>⟧, found ⟦page⟧

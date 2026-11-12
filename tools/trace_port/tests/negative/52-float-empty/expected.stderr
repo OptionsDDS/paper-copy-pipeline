@@ -1,0 +1,1 @@
+1:118: error: empty span 'float': ⟦float⟧ is immediately followed by ⟦/float⟧, but a span must contain something

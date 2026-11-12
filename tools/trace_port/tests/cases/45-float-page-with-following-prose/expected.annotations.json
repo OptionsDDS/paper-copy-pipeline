@@ -1,0 +1,138 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 1
+    },
+    {
+      "page": 2,
+      "first_line": 2,
+      "last_line": 2
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 5,
+      "reading_start": 0,
+      "reading_end": 5,
+      "furniture": false
+    },
+    {
+      "line": 2,
+      "page": 2,
+      "printed_start": 6,
+      "printed_end": 11,
+      "reading_start": 5,
+      "reading_end": 11,
+      "furniture": false
+    }
+  ],
+  "spans": [
+    {
+      "name": "float",
+      "start": 0,
+      "end": 5,
+      "start_line": 1,
+      "end_line": 1
+    }
+  ],
+  "wraps": [],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [],
+  "float_spans": [
+    {
+      "id": "T1",
+      "kind": "table",
+      "basis": "map",
+      "ref": "float:t1",
+      "start": 0,
+      "end": 5,
+      "start_line": 1,
+      "end_line": 1
+    }
+  ],
+  "reading_map": [
+    {
+      "char": "T",
+      "line": 1,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": "a",
+      "line": 1,
+      "column": 1,
+      "offset": 1
+    },
+    {
+      "char": "b",
+      "line": 1,
+      "column": 2,
+      "offset": 2
+    },
+    {
+      "char": "l",
+      "line": 1,
+      "column": 3,
+      "offset": 3
+    },
+    {
+      "char": "e",
+      "line": 1,
+      "column": 4,
+      "offset": 4
+    },
+    {
+      "char": "\n",
+      "derived": "float",
+      "line": 1,
+      "offset": 5
+    },
+    {
+      "char": "B",
+      "line": 2,
+      "column": 0,
+      "offset": 6
+    },
+    {
+      "char": "o",
+      "line": 2,
+      "column": 1,
+      "offset": 7
+    },
+    {
+      "char": "d",
+      "line": 2,
+      "column": 2,
+      "offset": 8
+    },
+    {
+      "char": "y",
+      "line": 2,
+      "column": 3,
+      "offset": 9
+    },
+    {
+      "char": ".",
+      "line": 2,
+      "column": 4,
+      "offset": 10
+    }
+  ]
+}

@@ -1,0 +1,239 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 3
+    },
+    {
+      "page": 2,
+      "first_line": 4,
+      "last_line": 4
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 6,
+      "reading_start": 0,
+      "reading_end": 5,
+      "furniture": false
+    },
+    {
+      "line": 2,
+      "page": 1,
+      "printed_start": 7,
+      "printed_end": 13,
+      "reading_start": 9,
+      "reading_end": 16,
+      "furniture": false
+    },
+    {
+      "line": 3,
+      "page": 1,
+      "printed_start": 14,
+      "printed_end": 20,
+      "reading_start": 16,
+      "reading_end": 23,
+      "furniture": false
+    },
+    {
+      "line": 4,
+      "page": 2,
+      "printed_start": 21,
+      "printed_end": 25,
+      "reading_start": 5,
+      "reading_end": 9,
+      "furniture": false
+    }
+  ],
+  "spans": [
+    {
+      "name": "float",
+      "start": 10,
+      "end": 23,
+      "start_line": 2,
+      "end_line": 3
+    }
+  ],
+  "wraps": [
+    {
+      "line": 4,
+      "hyphen": "remove",
+      "basis": "review",
+      "ref": "review:join",
+      "reading_offset": 5,
+      "from": 1,
+      "removed": "U+002D",
+      "removed_reading": "-"
+    }
+  ],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [],
+  "float_spans": [
+    {
+      "id": "sample",
+      "kind": "caption",
+      "basis": "map",
+      "ref": "map:sample",
+      "start": 10,
+      "end": 23,
+      "start_line": 2,
+      "end_line": 3
+    }
+  ],
+  "reading_map": [
+    {
+      "char": "t",
+      "line": 1,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": "r",
+      "line": 1,
+      "column": 1,
+      "offset": 1
+    },
+    {
+      "char": "a",
+      "line": 1,
+      "column": 2,
+      "offset": 2
+    },
+    {
+      "char": "n",
+      "line": 1,
+      "column": 3,
+      "offset": 3
+    },
+    {
+      "char": "s",
+      "line": 1,
+      "column": 4,
+      "offset": 4
+    },
+    {
+      "char": "p",
+      "line": 4,
+      "column": 0,
+      "offset": 5
+    },
+    {
+      "char": "o",
+      "line": 4,
+      "column": 1,
+      "offset": 6
+    },
+    {
+      "char": "r",
+      "line": 4,
+      "column": 2,
+      "offset": 7
+    },
+    {
+      "char": "t",
+      "line": 4,
+      "column": 3,
+      "offset": 8
+    },
+    {
+      "char": "\n",
+      "derived": "float",
+      "line": 2,
+      "offset": 9
+    },
+    {
+      "char": "V",
+      "line": 2,
+      "column": 0,
+      "offset": 10
+    },
+    {
+      "char": "i",
+      "line": 2,
+      "column": 1,
+      "offset": 11
+    },
+    {
+      "char": "o",
+      "line": 2,
+      "column": 2,
+      "offset": 12
+    },
+    {
+      "char": "l",
+      "line": 2,
+      "column": 3,
+      "offset": 13
+    },
+    {
+      "char": "e",
+      "line": 2,
+      "column": 4,
+      "offset": 14
+    },
+    {
+      "char": "t",
+      "line": 2,
+      "column": 5,
+      "offset": 15
+    },
+    {
+      "char": " ",
+      "derived": "line-break",
+      "after_line": 2,
+      "offset": 16
+    },
+    {
+      "char": "S",
+      "line": 3,
+      "column": 0,
+      "offset": 17
+    },
+    {
+      "char": "i",
+      "line": 3,
+      "column": 1,
+      "offset": 18
+    },
+    {
+      "char": "g",
+      "line": 3,
+      "column": 2,
+      "offset": 19
+    },
+    {
+      "char": "n",
+      "line": 3,
+      "column": 3,
+      "offset": 20
+    },
+    {
+      "char": "a",
+      "line": 3,
+      "column": 4,
+      "offset": 21
+    },
+    {
+      "char": "l",
+      "line": 3,
+      "column": 5,
+      "offset": 22
+    }
+  ]
+}

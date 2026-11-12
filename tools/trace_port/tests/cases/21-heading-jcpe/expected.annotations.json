@@ -1,0 +1,178 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "cc92eb25cf4b445eeb9dc18a783ff75366f1741feb303912fc56b29d248b5dcc",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 1
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 16,
+      "reading_start": 0,
+      "reading_end": 16,
+      "furniture": false
+    }
+  ],
+  "spans": [
+    {
+      "name": "heading",
+      "start": 0,
+      "end": 16,
+      "start_line": 1,
+      "end_line": 1
+    }
+  ],
+  "wraps": [],
+  "glyphs": [
+    {
+      "line": 1,
+      "column": 1,
+      "printed": "U+2003",
+      "as": [
+        "U+0020"
+      ],
+      "rule": "unicode-space/1.0",
+      "reading_start": 1,
+      "reading_end": 2
+    },
+    {
+      "line": 1,
+      "column": 3,
+      "printed": "U+2003",
+      "as": [
+        "U+0020"
+      ],
+      "rule": "unicode-space/1.0",
+      "reading_start": 3,
+      "reading_end": 4
+    }
+  ],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [
+    {
+      "level": 1,
+      "basis": "map",
+      "ref": "outline:h",
+      "start": 0,
+      "end": 16,
+      "start_line": 1,
+      "end_line": 1
+    }
+  ],
+  "float_spans": [],
+  "reading_map": [
+    {
+      "char": "1",
+      "line": 1,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": " ",
+      "line": 1,
+      "column": 1,
+      "substituted": "U+2003",
+      "offset": 1
+    },
+    {
+      "char": "|",
+      "line": 1,
+      "column": 2,
+      "offset": 2
+    },
+    {
+      "char": " ",
+      "line": 1,
+      "column": 3,
+      "substituted": "U+2003",
+      "offset": 3
+    },
+    {
+      "char": "I",
+      "line": 1,
+      "column": 4,
+      "offset": 4
+    },
+    {
+      "char": "N",
+      "line": 1,
+      "column": 5,
+      "offset": 5
+    },
+    {
+      "char": "T",
+      "line": 1,
+      "column": 6,
+      "offset": 6
+    },
+    {
+      "char": "R",
+      "line": 1,
+      "column": 7,
+      "offset": 7
+    },
+    {
+      "char": "O",
+      "line": 1,
+      "column": 8,
+      "offset": 8
+    },
+    {
+      "char": "D",
+      "line": 1,
+      "column": 9,
+      "offset": 9
+    },
+    {
+      "char": "U",
+      "line": 1,
+      "column": 10,
+      "offset": 10
+    },
+    {
+      "char": "C",
+      "line": 1,
+      "column": 11,
+      "offset": 11
+    },
+    {
+      "char": "T",
+      "line": 1,
+      "column": 12,
+      "offset": 12
+    },
+    {
+      "char": "I",
+      "line": 1,
+      "column": 13,
+      "offset": 13
+    },
+    {
+      "char": "O",
+      "line": 1,
+      "column": 14,
+      "offset": 14
+    },
+    {
+      "char": "N",
+      "line": 1,
+      "column": 15,
+      "offset": 15
+    }
+  ]
+}

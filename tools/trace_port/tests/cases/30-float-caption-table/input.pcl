@@ -1,0 +1,4 @@
+⟦paper-copy 1.2 source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa uses=pcl/1.2⟧⟦page 1⟧⟦line 1⟧Results are shown in Table 1, and the
+⟦line 2⟧⟦float id=T1 kind=caption basis=map ref=float:t1⟧TABLE 1 Baseline values⟦/float⟧
+⟦line 3⟧⟦float id=T1 kind=table basis=map ref=float:t1⟧Age 54 Sex F⟦/float⟧
+⟦line 4⟧groups did not differ.

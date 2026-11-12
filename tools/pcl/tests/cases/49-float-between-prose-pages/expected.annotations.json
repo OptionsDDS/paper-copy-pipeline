@@ -1,0 +1,240 @@
+{
+  "pcl": "1.2",
+  "header": {
+    "version": "1.2",
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "uses": [
+      "pcl/1.2"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "first_line": 1,
+      "last_line": 3
+    },
+    {
+      "page": 2,
+      "first_line": 4,
+      "last_line": 4
+    }
+  ],
+  "lines": [
+    {
+      "line": 1,
+      "page": 1,
+      "printed_start": 0,
+      "printed_end": 7,
+      "reading_start": 0,
+      "reading_end": 7,
+      "furniture": false
+    },
+    {
+      "line": 2,
+      "page": 1,
+      "printed_start": 8,
+      "printed_end": 13,
+      "reading_start": 7,
+      "reading_end": 13,
+      "furniture": false
+    },
+    {
+      "line": 3,
+      "page": 1,
+      "printed_start": 14,
+      "printed_end": 18,
+      "reading_start": 13,
+      "reading_end": 18,
+      "furniture": false
+    },
+    {
+      "line": 4,
+      "page": 2,
+      "printed_start": 19,
+      "printed_end": 25,
+      "reading_start": 18,
+      "reading_end": 25,
+      "furniture": false
+    }
+  ],
+  "spans": [
+    {
+      "name": "float",
+      "start": 8,
+      "end": 18,
+      "start_line": 2,
+      "end_line": 3
+    }
+  ],
+  "wraps": [],
+  "glyphs": [],
+  "floats": [],
+  "paras": [],
+  "gaps": [],
+  "furniture": [],
+  "headings": [],
+  "float_spans": [
+    {
+      "id": "T1",
+      "kind": "table",
+      "basis": "map",
+      "ref": "float:t1",
+      "start": 8,
+      "end": 18,
+      "start_line": 2,
+      "end_line": 3
+    }
+  ],
+  "reading_map": [
+    {
+      "char": "B",
+      "line": 1,
+      "column": 0,
+      "offset": 0
+    },
+    {
+      "char": "e",
+      "line": 1,
+      "column": 1,
+      "offset": 1
+    },
+    {
+      "char": "f",
+      "line": 1,
+      "column": 2,
+      "offset": 2
+    },
+    {
+      "char": "o",
+      "line": 1,
+      "column": 3,
+      "offset": 3
+    },
+    {
+      "char": "r",
+      "line": 1,
+      "column": 4,
+      "offset": 4
+    },
+    {
+      "char": "e",
+      "line": 1,
+      "column": 5,
+      "offset": 5
+    },
+    {
+      "char": ".",
+      "line": 1,
+      "column": 6,
+      "offset": 6
+    },
+    {
+      "char": "\n",
+      "derived": "float",
+      "line": 2,
+      "offset": 7
+    },
+    {
+      "char": "T",
+      "line": 2,
+      "column": 0,
+      "offset": 8
+    },
+    {
+      "char": "a",
+      "line": 2,
+      "column": 1,
+      "offset": 9
+    },
+    {
+      "char": "b",
+      "line": 2,
+      "column": 2,
+      "offset": 10
+    },
+    {
+      "char": "l",
+      "line": 2,
+      "column": 3,
+      "offset": 11
+    },
+    {
+      "char": "e",
+      "line": 2,
+      "column": 4,
+      "offset": 12
+    },
+    {
+      "char": " ",
+      "derived": "line-break",
+      "after_line": 2,
+      "offset": 13
+    },
+    {
+      "char": "N",
+      "line": 3,
+      "column": 0,
+      "offset": 14
+    },
+    {
+      "char": "o",
+      "line": 3,
+      "column": 1,
+      "offset": 15
+    },
+    {
+      "char": "t",
+      "line": 3,
+      "column": 2,
+      "offset": 16
+    },
+    {
+      "char": "e",
+      "line": 3,
+      "column": 3,
+      "offset": 17
+    },
+    {
+      "char": "\n",
+      "derived": "float",
+      "line": 3,
+      "offset": 18
+    },
+    {
+      "char": "A",
+      "line": 4,
+      "column": 0,
+      "offset": 19
+    },
+    {
+      "char": "f",
+      "line": 4,
+      "column": 1,
+      "offset": 20
+    },
+    {
+      "char": "t",
+      "line": 4,
+      "column": 2,
+      "offset": 21
+    },
+    {
+      "char": "e",
+      "line": 4,
+      "column": 3,
+      "offset": 22
+    },
+    {
+      "char": "r",
+      "line": 4,
+      "column": 4,
+      "offset": 23
+    },
+    {
+      "char": ".",
+      "line": 4,
+      "column": 5,
+      "offset": 24
+    }
+  ]
+}
