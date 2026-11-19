@@ -1829,7 +1829,9 @@ def binary_shape(image):
     source = source.crop(box); w,h = source.size
     if w*h < 4: raise ValueError('undersampled glyph raster')
     ink_share = sum(bool(p) for p in source.getdata())/(w*h)
-    source = source.resize((32,32),Image.Resampling.NEAREST)
+    # Nearest sampling through the affine transform: the same sampler as resize(NEAREST),
+    # which one system build of the imaging package refuses (2026-11-14).
+    source = source.transform((32,32),Image.Transform.AFFINE,(w/32,0,0,0,h/32,0),Image.Resampling.NEAREST)
     canvas = Image.new('L',(40,40)); canvas.paste(source,(4,4))
     points = sum(1 << i for i,p in enumerate(canvas.getdata()) if p)
     return points,w/h,ink_share

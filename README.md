@@ -4,6 +4,8 @@ Turns a research paper PDF into one clean text file that an AI model can read, w
 
 **Status: stuck, and asking for help.** The program copies about one fresh paper in three without a serious error. The goal is 95 in 100. The last three rounds of fixes did not move that number. The details are below, with the measured results and the open problems.
 
+**Update, 2026-11-19.** This snapshot adds six more rounds of work: floats found by their labels, the front page, and tables (a grid laid over each table, and rules for rows and headers). Two later exams on fresh papers gave 13 of 43 papers without a serious error, so the rate above still stands. The Results section below describes the state before these rounds.
+
 ## What it is for
 
 A local AI model needs to read a personal library of research papers. Raw PDF text is not good enough for that. Columns get interleaved, tables turn into loose numbers, captions land in the middle of sentences, and running heads repeat on every page.
@@ -60,7 +62,7 @@ Tests:
 TMPDIR=/tmp /usr/bin/python3 -I tools/checker/run_tests.py /tmp/copy-tests
 ```
 
-Expected today: 162 test files, 2341 tests, 2 failing files. The two are `test_run_readers.py` and `test_trace_pcl_port.py`. Both failures are known and are not yet fixed.
+Expected today: 183 test files, 2705 tests, 2 failing files. The two are `test_run_readers.py` and `test_trace_pcl_port.py`. Both failures are known and are not yet fixed.
 
 ## How it is measured
 

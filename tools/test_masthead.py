@@ -149,13 +149,16 @@ class AdjacencyChoosesTheTitle(unittest.TestCase):
     def test_no_byline_shaped_row_promotes_nothing(self):
         # R4: the lower display block has prose under it, not names: the largest type stays
         a = parse(self.fixture(byline='the results of a survey were reported in this issue of the journal'))
-        self.assertEqual(a['title']['text'], 'SLEEP: MEDICINE')
-        self.assertFalse(a.get('title_reselected'))
+        # Round 6 rule T6 supersedes the earlier 'SLEEP: MEDICINE' expectation: one word in large type is not the title
+        # when a longer block in large type stands in the top half of the page.
+        self.assertEqual(a['title']['text'], f'{TITLE1} {TITLE2}')
 
     def test_aligned_large_row_is_not_rejected_by_alignment(self):
         # same left edge as the lower pair, below the top band, its face used on page 2 too
         a = parse(self.fixture(logo_x=20, page2_font='Bembo-Bold'))
-        self.assertEqual(a['title']['text'], 'SLEEP: MEDICINE')
+        # Round 6 rule T6 supersedes the earlier 'SLEEP: MEDICINE' expectation: one word in large type is not the title
+        # when a longer block in large type stands in the top half of the page.
+        self.assertEqual(a['title']['text'], f'{TITLE1} {TITLE2}')
 
     def test_lone_face_in_top_band_is_a_logo(self):
         # aligned with the pair, but in the top band and in a face used nowhere else on the paper
@@ -164,7 +167,9 @@ class AdjacencyChoosesTheTitle(unittest.TestCase):
 
     def test_face_used_on_later_pages_is_no_logo_evidence(self):
         a = parse(self.fixture(logo_x=20, logo_y=120, page2_font='Bembo-Bold'))
-        self.assertEqual(a['title']['text'], 'SLEEP: MEDICINE')
+        # Round 6 rule T6 supersedes the earlier 'SLEEP: MEDICINE' expectation: one word in large type is not the title
+        # when a longer block in large type stands in the top half of the page.
+        self.assertEqual(a['title']['text'], f'{TITLE1} {TITLE2}')
 
     def test_title_with_its_own_byline_stays(self):
         first, chars = page(1, [
@@ -187,7 +192,9 @@ class AdjacencyChoosesTheTitle(unittest.TestCase):
 
     def test_overlapping_logo_in_a_face_used_on_later_pages_stays(self):
         a = parse(self.fixture(logo_x=690, logo_y=300, page2_font='Bembo-Bold'))
-        self.assertEqual(a['title']['text'], 'SLEEP: MEDICINE')
+        # Round 6 rule T6 supersedes the earlier 'SLEEP: MEDICINE' expectation: one word in large type is not the title
+        # when a longer block in large type stands in the top half of the page.
+        self.assertEqual(a['title']['text'], f'{TITLE1} {TITLE2}')
 
     def test_title_case_title_row_is_not_the_logos_own_byline(self):
         # the pair's first title row reads as names (capitalised words and "and"); it is the
@@ -197,7 +204,9 @@ class AdjacencyChoosesTheTitle(unittest.TestCase):
         self.assertEqual(a['title']['text'], ' '.join(rows))
         self.assertEqual([n['name'] for n in a['authors']], ['Ann B. Carter', 'David E. Fong', 'Grace H. Ito'])
         a = parse(self.fixture(title=rows, byline='the results of a survey were reported in this issue of the journal'))
-        self.assertEqual(a['title']['text'], 'SLEEP: MEDICINE')   # no smaller byline under the pair: nothing excluded
+        # Round 6 rule T6 supersedes the earlier 'SLEEP: MEDICINE' expectation: one word in large type is not the title
+        # when a longer block in large type stands in the top half of the page.
+        self.assertEqual(a['title']['text'], ' '.join(rows))
 
 
 class WrappedTitleWordAfterReselection(unittest.TestCase):

@@ -21,8 +21,16 @@
 H=$(cd "$(dirname "$0")" && pwd); P=$H/standalone/element_boxer_sc.py; pdf=$1; out=$2; mkdir -p "$out"
 if [ "$3" != --copy-only ]; then
 env -i PATH=/usr/bin BOXER_SC_BACKGROUND=white /usr/bin/python3 -I -S $P --pdf "$pdf" --all-pages --out "$out" --no-draw > "$out/boxer.log" 2>&1 || { echo "rules 1-7 pages failed: $out/boxer.log"; exit 1; }
+# lane r5-line: where the lane changed lines of page 1, rules 6-8 also run on the page as built without the lane (in
+# $out/r5base); tools/r5_frontcheck.py keeps that build when the title or the number of authors or affiliations differ
+if [ -f "$out/r5base-page-01.json" ]; then
+  mkdir -p "$out/r5base" && cp "$out"/page-[0-9]*.json "$out/r5base/" && cp "$out/r5base-page-01.json" "$out/r5base/page-01.json"
+  env -i PATH=/usr/bin /usr/bin/python3 -I -S $P --paper "$out/r5base" --no-draw > "$out/r5base/boxer.log" 2>&1
+  env -i PATH=/usr/bin /usr/bin/python3 -I -S $P --authors --pdf "$pdf" --paper "$out/r5base" >> "$out/r5base/boxer.log" 2>&1
+fi
 env -i PATH=/usr/bin /usr/bin/python3 -I -S $P --paper "$out" --no-draw >> "$out/boxer.log" 2>&1 || { echo "paper pass failed: $out/boxer.log"; exit 1; }
 env -i PATH=/usr/bin /usr/bin/python3 -I -S $P --authors --pdf "$pdf" --paper "$out" >> "$out/boxer.log" 2>&1 || echo "rule 8 failed (copy goes on without authors): $out/boxer.log"
+if [ -f "$out/r5base-page-01.json" ]; then /usr/bin/python3 -I $H/tools/r5_frontcheck.py "$out" >> "$out/boxer.log" 2>&1 || echo "first-page check failed: $out/boxer.log"; fi
 /usr/bin/python3 -I $H/tools/read_shapes.py "$out" "$(readlink -f "$pdf")" >> "$out/boxer.log" 2>&1 || echo "shape-text OCR step failed or unavailable (copy goes on with [unreadable] cells): $out/boxer.log"
 /usr/bin/python3 -I $H/tools/read_signs.py "$out" "$(readlink -f "$pdf")" >> "$out/boxer.log" 2>&1 || echo "sign OCR step failed or unavailable (copy keeps unresolved glyphs): $out/boxer.log"
 fi

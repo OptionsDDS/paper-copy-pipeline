@@ -344,6 +344,14 @@ with open(__file__,'rb') as _source:
 LABEL = re.compile(r"^\s*((?:[A-Z]\s*){3,12}?)\s*(\d+[A-Za-z]?)\b")   # "TA B L E 1", "F I G U R E 2", "TABLE 5"
 TABLE_NUMBER = r"(?:\d+[A-Za-z]?|[IVXLCDM]+)"
 TABLE_LABEL = re.compile(r'^\s*T\s*A\s*B\s*L\s*E\s+('+TABLE_NUMBER+r')\b',re.I)
+# F20: a continuation form after the label's number ("Table 3 (Continued)", "Table 3 (cont.)", "Table 3 cont'd",
+# "Table 3 Continued") marks a further part of a float already labelled; the form is the label, the line has no title
+CONTINUED_TABLE_LABEL = re.compile(r'^\s*T\s*A\s*B\s*L\s*E\s+('+TABLE_NUMBER+r')\s*[.:]?\s*'
+                                   r'(?:\(\s*(?:continued|cont\.?|cont\'d)\s*\)|(?:continued|cont\.|cont\'d)\b)', re.I)
+def continued_table_label(text):
+    """F20: the table number of a label that opens with a continuation form, or None"""
+    m = CONTINUED_TABLE_LABEL.match(text or '')
+    return m.group(1) if m else None
 LABEL_WORDS = ("TABLE", "FIGURE", "FIG", "SUPPLEMENTARY", "SCHEME", "BOX", "CHART", "PLATE")
 SENT_END = re.compile(r"[.?!:]['\")\]’”]*$")
 # A cell whose text ends like this is unfinished: the next printed line in that column wraps it (R1).
@@ -529,6 +537,7 @@ def trace_float(out, start, body_start, notes_start, it, caption, fragment):
     source = it.get('table_source') or {}
     cap_ids = list(it.get('caption_ids') or source.get('caption_ids') or [])
     cap_runs = [(page, m, False) for m in cap_ids]
+    cap_runs += [(pg, m, False) for pg, m in it.get('caption_cont_runs', [])]   # F14: its part in the next column
     line = str(out[start+1]) if start+1 < len(out) else ''
     # The written caption line, after raised-mark rendering: **caption**,
     # optionally followed by the image-only notice.
@@ -541,7 +550,8 @@ def trace_float(out, start, body_start, notes_start, it, caption, fragment):
         inferred = (not cap_runs and not trace_segs(caption, it.get('caption')) and
                     re.search(r'\((?:continued|additional columns)[^()]*\)$|no caption|caption not recovered', c, re.I))
         out[start+1] = '**' + trace_mark(c, 'caption', [caption, it.get('caption')], runs=cap_runs,
-            generated='program inferred continuation caption' if inferred else None) + line[2+len(c):]
+            generated='program inferred continuation caption' if inferred else
+                      'program paired-table label' if it.get('tp_label') and not cap_runs else None) + line[2+len(c):]
     for k, sc in enumerate(it.get('subcaptions', [])):
         # subfigure panel captions written as the caption's continuation lines claim their own runs
         if start+2+k < len(out):
@@ -702,6 +712,9 @@ def copied_word_count(text, pattern=r"[A-Za-z]{2,}"):
 
 
 LIST_MARKER = re.compile(r'^\s*(?:[•●◦]\s*|(?:-|\d{1,2}[.)]|[a-z][.)]|\([a-z]\))\s+)')
+KEYWORDS_ROW = re.compile(r'^\s*(?:Key\s*-?\s*words?|Keywords|Index\s+terms)(?:\s*[:.]|\s*$|\s+(?=(?-i:[A-Z])))', re.I)   # lane r6-abstract (B4)
+OTHER_BOX_LABEL = re.compile(r'(?:Highlights|Clinical (?:relevance|significance|implications)|Plain language summary|Lay summary|Key points|Key messages|What is known|What (?:is )?this (?:study|paper) adds)\s*:?', re.I)   # lane r6-abstract (B11)
+RUNIN_PART_SPLIT = re.compile(r'(?<=[.!?])\s+(?=[A-Z][A-Za-z/-]*(?:\s+[A-Za-z/-]+){0,3}\s*:\s)|\s+(?=(?:Keywords|KEYWORDS|Key\s*words)\s*:)')   # lane r6-abstract (B2, B5): parts at their run-in labels
 ABSTRACT_PARTS = re.compile(r"(?<!and)\s(?=(?:Objectives?|Aims?|Background|Introduction|Purpose|Materials and [Mm]ethods|Methods|Results|Conclusions?|"
                             r"Clinical [Rr]elevance|Clinical [Ss]ignificance|Clinical [Ii]mplications|Scientific [Rr]ationale[^:]{0,40}|Principal [Ff]indings|Practical [Ii]mplications|"
                             r"Keywords|KEYWORDS|Key words)\b\s*:?)")
@@ -1047,14 +1060,190 @@ def display_formula_runs(runs, page):
     return [replaced.get(e['id'],e) for e in runs if e['id'] not in removed or e['id'] in replaced]
 
 
-def prose_text_rows(runs, page):
+FORMULA_NUMBER = re.compile('[(\\[{�]\\s*\\d{1,3}[a-z]?\\s*[)\\]}�]')
+
+
+def display_formula_zones(page, runs, candidates, body, frames=()):
+    """O16, O29, O30 (round 5): the display formulas of a page's text columns, from the page alone.
+
+    A formula is found from one of two marks: a number in brackets standing alone at the right edge
+    of its column (O16; an unread bracket sign counts as a bracket), with formula text to its left;
+    or a drawn bar (a thin horizontal rule shorter than the column, outside tables and figures) with
+    text directly above and below it (O30). From the mark the formula takes every free run of its
+    column that lies within a white gap smaller than 0.6 body sizes, and stops at a line of prose (a
+    line starting at the column's left edge or a paragraph indent that fills the measure or ends a
+    sentence, with three or more words). A formula with a bar, or whose full-size characters stand on
+    more than one baseline, is stacked; otherwise it is simple. A bar inside a line of running text (a prose line
+    level with it, or four or more words level with it outside its stretch) is an inline fraction: it is returned
+    with inline=True and no runs, to be listed and left in its line. Returns zones as dicts: ids (run ids),
+    box, stacked, reasons (why stacked), number (run id or None), bar (box or None), unread (any
+    unread sign in its text). candidates: the run ids no float, table, footnote or furniture took."""
+    cand = [m for m in candidates if m in runs and not round(runs[m].get('angle', 0)) % 360 and runs[m]['text'].strip()]
+    if not cand: return []
+    B = lambda m: runs[m]['box_px']
+    width = lambda m: B(m)[2]-B(m)[0]
+    words = lambda m: len(re.findall(r'[^\W\d_]{2,}', runs[m]['text']))
+    # Column measure: the full lines of running text (three or more words, the widest runs of the page).
+    wide = sorted(width(m) for m in cand if words(m) >= 3)
+    if len(wide) < 3: return []
+    colw = wide[int(.75*(len(wide)-1))]
+    # a column is set by lines of its own measure; a line across several columns (a title, a wide abstract) is no
+    # column line (pool memo 1: one wide line made a three-column page one column)
+    full = [m for m in cand if words(m) >= 3 and .9*colw <= width(m) <= 1.15*colw]
+    if not full: return []
+    columns = []
+    for m in sorted(full, key=lambda m: B(m)[0]):
+        if columns and B(m)[0]-columns[-1][0] <= 2*body:
+            columns[-1][1] = max(columns[-1][1], B(m)[2]); columns[-1][2] += 1
+        else: columns.append([B(m)[0], B(m)[2], 1])
+    columns = [(a, b) for a, b, n in columns if n >= 2]
+    def column_of(box):
+        cx = (box[0]+box[2])/2
+        hits = [c for c in columns if c[0]-body <= cx <= c[1]+body]
+        return hits[0] if len(hits) == 1 else None
+    def prose(m):
+        # a line of running text: from the column's left edge or a paragraph indent, it ends a sentence, or
+        # fills the measure with three or more words, or holds four or more words of three letters and no
+        # operator sign (a lead-in line such as "the variance of the two series is")
+        c = column_of(B(m)); b = B(m); t = runs[m]['text'].strip()
+        if c is None or b[0] > c[0]+2.5*body or not words(m): return False
+        if re.search(r'[.:;,?!]["\')\]’”]*$', t): return True
+        if words(m) >= 3 and b[2] >= c[1]-1.5*body: return True
+        return len(re.findall(r'[^\W\d_]{3,}', t)) >= 4 and not re.search(r'[=+−×÷±<>≤≥]', t)
+    def vgap(a, b): return max(a[1]-b[3], b[1]-a[3])
+    def overlap_x(a, b): return min(a[2], b[2]) > max(a[0], b[0])
+    free = {m for m in cand if not prose(m)}
+    inline = []
+    fills = [list(e['box_px']) for e in page.get('elements', []) + page.get('art', []) if e.get('kind') == 'fill'
+             and e['box_px'][3]-e['box_px'][1] >= .15*body]
+    def wordy(f):   # a filled box holding a line of three or more words
+        return any(words(n) >= 3 and f[0]-1 <= B(n)[0] and B(n)[2] <= f[2]+1 and f[1]-1 <= B(n)[1] and B(n)[3] <= f[3]+1 for n in cand)
+    rules = []   # thin horizontal rules; collinear pieces that touch are one rule (a table ruling drawn cell by cell)
+    for r in sorted((list(e['box_px']) for e in page.get('elements', []) + page.get('art', []) if e.get('kind') == 'rule'
+                     and e['box_px'][3]-e['box_px'][1] < .15*body), key=lambda r: (round(r[1]), r[0])):
+        if rules and abs(rules[-1][1]-r[1]) <= .1*body and r[0] <= rules[-1][2]+.2*body:
+            rules[-1][2] = max(rules[-1][2], r[2]); rules[-1][3] = max(rules[-1][3], r[3])
+        else: rules.append(r)
+    anchors = []
+    for m in sorted(free, key=lambda m: B(m)[1]):
+        if not FORMULA_NUMBER.fullmatch(runs[m]['text'].strip()): continue
+        c = column_of(B(m)); b = B(m)
+        if c is None or b[2] < c[1]-1.5*body: continue
+        row = [n for n in cand if n != m and column_of(B(n)) == c and min(B(n)[3], b[3]) > max(B(n)[1], b[1])]
+        if any(n not in free or B(n)[2] > b[0]-2*body for n in row): continue
+        near = [n for n in free if n != m and column_of(B(n)) == c and B(n)[2] <= b[0]-2*body and vgap(B(n), b) <= 2*body]
+        if not near: continue
+        anchors.append(('number', m, [m] + row, None))
+    for r in rules:
+        a, y, b, z = r
+        if not (body <= b-a and 0 <= z-y < .15*body): continue
+        c = column_of(r)
+        if c is None or b-a > .85*(c[1]-c[0]) or a < c[0]-body or b > c[1]+body: continue
+        # the edge of a filled rectangle is no fraction bar, nor is a rule inside a filled box that holds lines of
+        # words (boxed text; pool memo 1)
+        if any(f[0]-body <= a and b <= f[2]+body and (min(abs(y-f[1]), abs(y-f[3])) <= .3*body or
+                                                       f[1] <= y <= f[3] and wordy(f)) for f in fills): continue
+        if any(min(b, f[2]) > max(a, f[0]) and f[1]-body <= y <= f[3]+body for f in frames): continue
+        above = [m for m in free if overlap_x(B(m), r) and y-1.2*body <= B(m)[3] <= z+.3*body and B(m)[1] < y]
+        below = [m for m in free if overlap_x(B(m), r) and y-.3*body <= B(m)[1] <= z+1.2*body and B(m)[3] > z]
+        if not above or not below: continue
+        # a table grid: two or more other rules over the same stretch within three body sizes
+        if sum(1 for o in rules if o is not r and abs(o[1]-y) <= 3*body and min(o[2], b)-max(o[0], a) >= .5*(b-a)) >= 2: continue
+        # a fraction bar has text level with it: beside it, or a run that reaches past its ends
+        my = (y+z)/2
+        level = [m for m in free if abs((B(m)[1]+B(m)[3])/2-my) <= .7*body and
+                 (B(m)[2] <= a+body or B(m)[0] >= b-body or B(m)[0] <= a-.5*body or B(m)[2] >= b+.5*body)]
+        if not level: continue
+        # the text under a fraction bar stands within the bar (an underline has the next line under it)
+        if not any(B(m)[0] >= a-.5*body and B(m)[2] <= b+.5*body for m in below): continue
+        # an inline fraction (hold-back memo 1): the bar sits inside a line of running text. A prose line of its
+        # column stands level with it, or the text level with it outside its stretch holds four or more words of
+        # three letters (a display formula has at most a short left-hand side there). It stays in its line as
+        # printed and is only listed (O30).
+        cy = lambda m: (B(m)[1]+B(m)[3])/2
+        band = [m for m in cand if column_of(B(m)) == c and abs(cy(m)-my) <= .5*body]
+        def outside(m):
+            cs = runs[m].get('_chars') or []
+            if not cs: return runs[m]['text'] if B(m)[2] <= a or B(m)[0] >= b else ''
+            out, last = '', None   # word spaces are not characters: a gap wider than a fifth of the size is one
+            for ch in sorted(cs, key=lambda ch: ch['x0']):
+                if last is not None and ch['x0']-last['x1'] > .2*ch.get('size', body): out += ' '
+                out += ch['text'] if (ch['x1'] <= a or ch['x0'] >= b) else ' '
+                last = ch
+            return out
+        if any(prose(m) for m in band) or len(re.findall(r'[^\W\d_]{3,}', ' '.join(outside(m) for m in band))) >= 4:
+            inline.append(dict(ids=[], box=hull([list(r)] + [B(m) for m in above + below]), inline=True, column=c,
+                               number=None, bar=list(r), stacked=True, reasons=['inline'], unread=False))
+            continue
+        # a table row: three or more runs (not prose, the page's tables included) away from the bar's stretch,
+        # at the height of the text above, beside or below the bar
+        cells = [n for n, e in runs.items() if not round(e.get('angle', 0)) % 360 and e['text'].strip() and not (n in cand and prose(n))
+                 and not a-2*body <= (B(n)[0]+B(n)[2])/2 <= b+2*body]
+        if any(sum(1 for n in cells if abs(cy(n)-h) <= .5*body) >= 3 for h in (cy(above[0]), my, cy(below[0]))): continue
+        anchors.append(('bar', None, above + below + level, list(r)))
+    zones, taken = [], set()
+    anchors = [an for an in anchors if column_of(B(an[2][0])) is not None]
+    for kind, number, seed, bar in anchors:
+        if any(m in taken for m in seed):
+            for zn in zones:
+                if set(seed) & set(zn['ids']):
+                    if bar and not zn['bar']: zn['bar'] = bar
+                    if number and not zn['number']: zn['number'] = number
+            continue
+        c = column_of(B(seed[0]))
+        ids = list(dict.fromkeys(seed)); box = hull(B(m) for m in ids)
+        grew = True
+        while grew:
+            grew = False
+            for m in sorted(free - taken - set(ids), key=lambda m: B(m)[1]):
+                if column_of(B(m)) != c or vgap(B(m), box) > .6*body: continue
+                ids.append(m); box = hull([box, B(m)]); grew = True
+        if bar: box = hull([box, bar])
+        taken.update(ids)
+        zones.append(dict(ids=ids, box=box, number=number, bar=bar, column=c))
+    # A formula lies inside one column; text in a filled box that also holds lines of words is boxed text.
+    def boxed(m):
+        return any(f[0]-1 <= B(m)[0] and B(m)[2] <= f[2]+1 and f[1]-1 <= B(m)[1] and B(m)[3] <= f[3]+1 and wordy(f) for f in fills)
+    zones = [zn for zn in zones if zn['box'][0] >= zn['column'][0]-body and zn['box'][2] <= zn['column'][1]+body
+             and not any(boxed(m) for m in zn['ids'])]
+    for zn in zones:
+        reasons = []
+        if zn['bar']: reasons.append('bar')
+        chars = [ch for m in zn['ids'] if m != zn['number'] for ch in runs[m].get('_chars', [])
+                 if 'size' in ch and 'origin' in ch and ch.get('text', '').strip()]
+        # Baselines of the full-size characters: delimiters, radicals and large operators (often drawn
+        # in a larger size on their own baseline) and unread signs are left out; full size is the
+        # largest size that occurs twice or more among the other characters.
+        chars = [ch for ch in chars if ch['text'] not in '()[]{}|‖√∑∫∏⟨⟩\ufffd']
+        sizes = collections.Counter(round(ch['size'], 1) for ch in chars)
+        if chars:
+            size = max([s for s, n in sizes.items() if n >= 2] or sizes)
+            lines = []   # [last y, count]: a baseline holds three or more full-size characters
+            for y in sorted(ch['origin'][1] for ch in chars if .85*size <= ch['size'] <= 1.15*size):
+                if lines and y-lines[-1][0] <= .3*size: lines[-1] = [y, lines[-1][1]+1]
+                else: lines.append([y, 1])
+            if sum(n >= 3 for _, n in lines) > 1: reasons.append('baselines')
+        else:
+            rows = []
+            for m in sorted((m for m in zn['ids'] if m != zn['number']), key=lambda m: B(m)[1]):
+                if rows and B(m)[1] < rows[-1]-.3*body: rows[-1] = max(rows[-1], B(m)[3])
+                else: rows.append(B(m)[3])
+            if len(rows) > 1: reasons.append('rows')
+        zn['stacked'] = bool(reasons); zn['reasons'] = reasons
+        zn['unread'] = any('�' in runs[m]['text'] or any(ch.get('_mark_unverified') for ch in runs[m].get('_chars', []))
+                           for m in zn['ids'])
+    return zones + inline
+
+
+def prose_text_rows(runs, page, fractions=True):
     """A tall initial belongs to the first ordinary baseline beside it.
 
     Verified characters can span multiple lines in one saved run. Separate the
     ordinary baselines before attaching the initial, retaining every character
     once. Glyph advances preserve word spaces. Tables use their own row reader.
+    fractions=False: a display formula block (O30) keeps its printed rows; no fraction is written on one line.
     """
-    runs=display_formula_runs(runs,page)
+    if fractions: runs=display_formula_runs(runs,page)
     adjusted = []
     for e in runs:
         cs = e.get('_chars', [])
@@ -1079,14 +1268,23 @@ def prose_text_rows(runs, page):
             if i == 0: row = [cap]+row; box[0] = cap['x0']
             text = ''
             for j, c in enumerate(row):
-                if j and c['origin'][0]-(row[j-1].get('adv_x1') or row[j-1]['x1']) > .18*size: text += ' '
+                # lane r6-abstract (S12): the tall initial belongs to the first word, with no space after it,
+                # when a small letter follows it (the gap after it is the initial's own margin)
+                if j and c['origin'][0]-(row[j-1].get('adv_x1') or row[j-1]['x1']) > .18*size and not (
+                        i == 0 and j == 1 and c['text'].islower() and cap['text'] not in 'AI'): text += ' '
                 text += c['text']
             if len(rows)==1 and row==cs:
                 # Ordinary word spacing in an already ordered line is stronger
                 # evidence than approximate glyph hulls (especially in scans).
                 text=e['text']
-                if rest[0]['origin'][0]-(cap.get('adv_x1') or cap['x1'])>.18*size and not text[1].isspace():
+                if rest[0]['origin'][0]-(cap.get('adv_x1') or cap['x1'])>.18*size and not text[1].isspace() and not (text[1].islower() and cap['text'] not in 'AI'):
                     text=text[0]+' '+text[1:]
+                if len(text) > 2 and text[0] == cap['text'] and text[1] == ' ' and text[2].islower() and cap['text'] not in 'AI':
+                    text = text[0]+text[2:]   # lane r6-abstract (S12)
+            if i == 0 and len(text) > 2 and text[0] == cap['text'] and cap['text'] in 'AI' and text[1] == ' ' and text[2].islower():
+                # A or I before a small letter: a one-letter word or the first letter of a word; the page does not
+                # tell (the gap is the initial's margin), so the printed spacing stays and the place is listed
+                page.setdefault('_r6_initial_doubts', []).append(dict(box=[cap['x0'], cap['y0'], cap['x1'], cap['y1']]))
             adjusted.append(dict(e, text=text, box_px=box, _chars=row, _drop_cap_row=True)); texts.append(text)
         page.setdefault('copy_drop_caps', []).append(dict(run=e['id'], before=e['text'], after='\n'.join(texts),
             why='ordinary baselines separate the lines beside a tall initial'))
@@ -2040,6 +2238,80 @@ def round_bullet(c, page):
     return all(.85 < ((x-cx)/(w/2))**2+((y-cy)/(h/2))**2 < 1.15 for x,y in pen.points)
 
 
+DASH_FORMS = frozenset('-‐‑‒–—―−')
+
+
+def sign_reading(ch):
+    """a reading that names a sign: not a space and not a Latin letter (an accented letter is the program joining a
+    letter and its accent, not a reading of the glyph); Greek letters and the micro sign are signs"""
+    import unicodedata
+    if not ch.strip(): return False
+    if unicodedata.category(ch).startswith('L'):
+        return unicodedata.name(ch, '').startswith('GREEK') or ch == 'µ'
+    return True
+
+
+def same_glyph_same_sign(pages, uncertain):
+    """Rule O26 (lane r5-signs): inside one paper the same code in the same font object is the same sign.
+
+    Each printed character of a text run outside tables and figures is paired with its glyph (the reader's font
+    object and code) and the reading the PDF's text layer claimed for it. Where the program settled a glyph at some
+    places to one sign the claim is not (a sign check, an outline or OCR reading) and left the bare claim at others,
+    those others take the settled sign (a sign: not a Latin letter, which is the program joining a letter and its
+    accent). Where it found the claim wrong at some places (shown as U+FFFD) and settled
+    it nowhere, the bare claim is wrong at every place and is shown as U+FFFD too (and listed by rule O28). Two
+    different settled signs for one glyph are left as they are, and so is a hyphen, minus or dash the program set by
+    its context. Only single characters are changed; the order and
+    place of characters stay. Each glyph changed is named once in the uncertainty list."""
+    reader = sys.modules.get('_copy_table_reader')
+    if reader is None: return
+    groups = collections.defaultdict(list)
+    for p in pages:
+        if not p.get('_table_pdf') or (p.get('scan_evidence') or {}).get('ocr_layer'): continue
+        chars = table_characters(p)
+        if not chars: continue
+        try: raw = [c for c in reader.sc_read_page(p['_table_pdf'], p['page'])[0] if not c['hidden']]
+        except Exception: continue
+        b = p['region_box_px']; scale = p.get('params', {}).get('dpi', reader.PARAMS['dpi']) / reader.PARAMS['dpi']
+        raw = [c for c in raw if b[0] <= (c['x0']+c['x1'])/2*scale <= b[2] and b[1] <= (c['y0']+c['y1'])/2*scale <= b[3]]
+        if len(raw) != len(chars): continue
+        # a glyph whose text is several characters (a ligature) is no single sign
+        multi = {id(a) for a, b in zip(raw, raw[1:]) if a.get('source_code') == b.get('source_code') and a.get('origin') == b.get('origin')}
+        multi |= {id(b) for a, b in zip(raw, raw[1:]) if a.get('source_code') == b.get('source_code') and a.get('origin') == b.get('origin')}
+        skip = set()
+        for t in p.get('tables', []): skip.update(t.get('members') or [])
+        for f in p.get('floats', []):
+            skip.update(f.get('members') or []); skip.update(f.get('lettering') or [])
+        fboxes = [f['box_px'] for f in p.get('floats', []) + p.get('tables', []) if f.get('box_px')]
+        for e in p['elements']:
+            if e.get('kind') != 'text' or e['id'] in skip: continue
+            eb = e.get('box_px') or [0, 0, 0, 0]; cx, cy = (eb[0]+eb[2])/2, (eb[1]+eb[3])/2
+            if any(f[0] <= cx <= f[2] and f[1] <= cy <= f[3] for f in fboxes): continue
+            ids = [i for i in e.get('char_ids') or [] if 0 <= i < len(chars) and chars[i]['text'].strip()]
+            at = [k for k, ch in enumerate(e['text']) if ch.strip()]
+            if not ids or len(ids) != len(at): continue
+            for i, k in zip(ids, at):
+                c = raw[i]; claim = c['text']
+                if len(claim) != 1 or not isinstance(c.get('source_code'), int) or c.get('font_key') is None or id(c) in multi: continue
+                groups[(c['font_key'], c['source_code'])].append((p, e, k, claim, c))
+    changed = collections.Counter()
+    for (key, code), places in groups.items():
+        if len(places) < 2: continue
+        finals = [e['text'][k] for p, e, k, claim, c in places]
+        settled = {f for f, (p, e, k, claim, c) in zip(finals, places) if f != claim and f != '\ufffd' and sign_reading(f)}
+        if len(settled) == 1: target = next(iter(settled))
+        elif not settled and '\ufffd' in finals: target = '\ufffd'
+        else: continue
+        for f, (p, e, k, claim, c) in zip(finals, places):
+            if f != claim or f == target: continue
+            if claim in DASH_FORMS and target in DASH_FORMS: continue   # hyphen, minus, dashes: set by context
+            e['text'] = e['text'][:k] + target + e['text'][k+1:]
+            changed[(p['page'], re.sub(r'^[A-Z]{6}\+', '', c['font']), code, claim, target)] += 1
+    for (page, font, code, claim, target), n in sorted(changed.items()):
+        uncertain.append(f"page {page}: font {font}, glyph {code}: claimed {claim!r} shown as {target!r} in {n} place(s), "
+                         "as the same glyph is read elsewhere in the paper")
+
+
 def restore_prose_glyphs(pages):
     """Compose spacing accents over their native letter and recover proved list disks.
 
@@ -2709,6 +2981,16 @@ def table_word_space(lines, h):
     gaps=sorted(g for L in lines for (a,_,_),(b,_,_) in zip(L['items'],L['items'][1:]) for g in [b[0]-a[2]] if 0<g<.5*h)
     return gaps[len(gaps)//2] if gaps else .25*h
 
+def table_header_cells(items, space):
+    """Rule TC4 (round 7, columns): a header cell is a run of words on one header line set with gaps under two
+    word spaces. items are one printed line's (box, text, run) items; the cells come back in reading order, each a
+    list of items. Saved runs do not matter: a producer may save one header cell as several runs."""
+    cells=[]
+    for it in sorted(items,key=lambda it:it[0][0]):
+        if cells and it[0][0]-max(b[2] for b,t,e in cells[-1])<2*space: cells[-1].append(it)
+        else: cells.append([it])
+    return cells
+
 def table_phrases(boxes, space):
     """Boxes in reading order joined into phrases: words set at most two word spaces apart."""
     phrases=[]
@@ -2826,6 +3108,1016 @@ def value_stack(lines, x, h, hi=None):
     spread=lambda xs: max(xs)-min(xs)<.3*h
     return spread([b[0] for b in right_vals]) or spread([b[2] for b in right_vals]) or spread([(b[0]+b[2])/2 for b in right_vals])
 
+_R7_OFF=[False]   # r7-columns: True while table_rows reads a table as BASE did (the gate compares the two readings)
+_R8_OFF=[False]   # r8-overlay: True while table_rows reads a table without the overlay (the gate compares the two readings)
+_R8_RENDERS={}
+
+
+def overlay_module():
+    """overlay.py at the tree root (lane r8-overlay, rules TG1-TG7): the spreadsheet grid laid over a table."""
+    import importlib.util
+    mod=sys.modules.get('_copy_overlay')
+    if mod is None:
+        spec=importlib.util.spec_from_file_location('_copy_overlay',os.path.join(os.path.dirname(os.path.abspath(__file__)),'overlay.py'))
+        mod=importlib.util.module_from_spec(spec);sys.modules['_copy_overlay']=mod;spec.loader.exec_module(mod)
+    return mod
+
+
+def table_overlay(lines, graphics, page, angle, k):
+    """Rules TG1-TG7 (r8-overlay): the overlay's fit over the table's printed lines as the program has them (its own
+    baselines, words and drawn rules and fills, in the table's frame). Shading is read from the page render (G9b),
+    for an upright page whose render shows ink in the table's word boxes (the frames agree); else from the record."""
+    ov=overlay_module()
+    render=None
+    pdf=(page or {}).get('_table_pdf')
+    a=round(angle)%360
+    if pdf:
+        # lane r8-turned: a turned part (text at a quarter or half turn, or a page turned by its flag) reads the render
+        # through its upright frame: the reader's point is turned back to the record's frame by the part's own angle,
+        # then to the render by the page's flag (r8_render_point); an upright part on an unturned page as before
+        key=(pdf,page['page']) if a==0 else (pdf,page['page'],a)
+        if key not in _R8_RENDERS:
+            try:
+                reader=sys.modules.get('_copy_table_reader')
+                d=reader.sc_doc(pdf) if reader else None
+                rot=d.pages[page['page']-1].rotate%360 if d is not None else None
+                if d is None or rot not in (0,90,180,270) or a not in (0,90,180,270): _R8_RENDERS[key]=None
+                elif a==0 and rot==0:
+                    _,_,(cx0,cy0,_,_)=d.page_size(page['page'])
+                    _R8_RENDERS[key]=ov.page_render(pdf,page['page'],k*72,cx0,cy0)
+                else:
+                    _,height,crop=d.page_size(page['page'])
+                    _R8_RENDERS[key]=ov.page_render(pdf,page['page'],k*72,0,0,to_render=r8_render_point(a,rot,height,crop,k))
+            except Exception:
+                _R8_RENDERS[key]=None
+        render=_R8_RENDERS[key]
+        if render:
+            boxes=[b for L in lines for b,t,e in L['items'] if len(t)>=2][:40]
+            if not boxes or sum(render['ink'](b)<128 for b in boxes)<.8*len(boxes): render=None
+    def size_of_factory():
+        flat=[it for L in lines for it in L['items']]
+        sizes=[]
+        for b,t,e in flat:
+            cs=sorted(c['size'] for c in e.get('_chars',[]) if c.get('size'))
+            sizes.append(cs[len(cs)//2]/k if cs else (b[3]-b[1])/k*.75)
+        return lambda ii: sizes[ii]
+    try:
+        return ov.fit(lines,graphics,k,render=render,size_of=size_of_factory())
+    except Exception:
+        return None
+
+
+def frame_point_back(angle):
+    """lane r8-turned: the inverse of frame() for a point: (u, v) in the upright frame of text set at this angle ->
+    (x, y) in the record's frame (an exact quarter or half turn, no rounding)"""
+    a = round(angle) % 360
+    if a == 90: return lambda u, v: (v, -u)
+    if a == 270: return lambda u, v: (-v, u)
+    if a == 180: return lambda u, v: (-u, -v)
+    return lambda u, v: (u, v)
+
+
+def frame_box_back(angle):
+    """lane r8-turned: the inverse of frame() for a box"""
+    back = frame_point_back(angle)
+    def f(b):
+        (x0, y0), (x1, y1) = back(b[0], b[1]), back(b[2], b[3])
+        return [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
+    return f
+
+
+def r8_render_point(angle, rotation, height, crop, k):
+    """lane r8-turned: a point of a turned part's upright frame (record pixels at k pixels per point, turned by the
+    part's angle) -> the pixel of Poppler's render of the page at the same scale, which applies the page's /Rotate
+    flag and its CropBox (the corner arithmetic of float_render_transform)"""
+    back = frame_point_back(angle)
+    x0, y0, x1, y1 = crop
+    def to_render(u, v):
+        x, y = back(u, v)
+        uu, vv = x / k, height - y / k
+        if rotation == 90: a, b = vv - y0, uu - x0
+        elif rotation == 180: a, b = x1 - uu, vv - y0
+        elif rotation == 270: a, b = y1 - vv, x1 - uu
+        else: a, b = uu - x0, y1 - vv
+        return a * k, b * k
+    return to_render
+
+
+# Print-step switches of the clue path (TW20 T1P: caption title rows taken out by T1 do not refuse a part); off
+R8_CLUE_FLAGS=frozenset({'NOTES_LOWEST','T1P','SLW3','D7L','TW7B','TW5C','PH24'})
+
+
+def forms_tag(forms):
+    """the built clue form: PROC with the B7, D7, D8 and D9 items (as the print step uses it)"""
+    return 'clues' if {'PROC','B7','D7','D8','D9'}<=set(forms) else ''
+
+
+_TW25W=[None]
+def tw25_kind(t):
+    """(TW25, the supervisor's form for knowing a fixed term) the first word of t: 'greek' (a Greek letter), 'cap' (the
+    spelling list /usr/share/dict/words holds it only with a capital first letter), 'small' (only with a small first
+    letter and a capital inside), else None (not held, or held both ways)."""
+    w=re.sub(r'^[\W_]+|[\W_]+$','',((t or '').split() or [''])[0])
+    if not w: return None
+    if '\u0370'<=w[:1]<='\u03ff': return 'greek'
+    if _TW25W[0] is None:
+        d=collections.defaultdict(set)
+        try:
+            for x in open('/usr/share/dict/words',encoding='utf-8',errors='ignore'):
+                x=x.strip()
+                if x and "'" not in x: d[x.lower()].add(x)
+        except OSError: pass
+        _TW25W[0]=d
+    f=_TW25W[0].get(w.lower())
+    if not f: return None
+    if w[:1].isupper() and all(x[:1].isupper() for x in f): return 'cap'
+    if w in f and all(x[:1].islower() and any(c.isupper() for c in x[1:]) for x in f): return 'small'
+    return None
+
+
+_TW25P=[None]
+def tw25_place(t):
+    """(TW25, the user's ruling 2026-11-18: a fixed-capital term is the name of a country or a place, nothing else) does t
+    start with a whole place name of place_names.txt (the time-zone data's country and city names, public domain)?"""
+    if _TW25P[0] is None:
+        try: _TW25P[0]=sorted({l.strip() for l in open(os.path.join(os.path.dirname(os.path.abspath(__file__)),'place_names.txt'),encoding='utf-8')
+                               if l.strip() and not l.startswith('#')},key=len,reverse=True)
+        except OSError: _TW25P[0]=[]
+    t=(t or '').strip()
+    return any(t==n or (t.startswith(n) and not t[len(n):len(n)+1].isalnum()) for n in _TW25P[0])
+
+
+def tw24_lower(t):
+    """(TW24, switches PH24 and PH24W, off) does this text start with a small letter, as a sentence running on? PH24 (the
+    user's ruling): a text that starts with "pH" or a Greek letter is not a small-letter start. PH24W (the supervisor's
+    reading, not yet the user's): nor one that starts with another sign, nor a term with a small first letter and a capital
+    inside it."""
+    t=t or ''
+    if ('PH24' in R8_CLUE_FLAGS or 'PH24W' in R8_CLUE_FLAGS) and (t.startswith('pH') or '\u0370'<=t[:1]<='\u03ff'): return False   # (user: pH and a Greek letter)
+    if 'TW25S' in R8_CLUE_FLAGS and tw25_kind(t) in ('greek','small'): return False   # (TW25S) a fixed-small term or a Greek letter
+    if 'PH24W' in R8_CLUE_FLAGS:   # (supervisor's reading) another sign at the start; a small first letter with a capital inside
+        w=t.split()[0] if t.split() else ''
+        if t[:1] and not t[:1].isalpha(): return False
+        if w[:1].islower() and any(ch.isupper() for ch in w[1:]): return False
+    return t[:1].islower()
+
+
+def overlay_grid(fit, lines, header, graphics, k, forms=frozenset()):
+    """Step 3 (r8-overlay, send-back 2): the overlay's own grid of a table, one printed line to a row, and the page
+    conditions under which it may stand for a flagged table:
+      a  one panel: the overlay laid over the upper and the lower half of the body alone finds as many columns, and
+         every group of each half lies in the same columns by those lines as by the whole table's (no change of columns);
+      b  every body line has groups in two or more columns (no line that could be a wrapped cell);
+      c  every border between two body lines is a drawn line or a change of shading;
+      d  no merged cell below the header; each merged header cell stands over body ink in every column it covers and
+         over less than half the columns (else it is a caption or title line, G6); a header cell on two lines keeps
+         one span; no line opens with a table or figure label (the part holds no caption line).
+    The header is the program's header lines; without them, the top lines holding no value (at most three).
+    Returns the conditions and the rows (cells as lists of words' texts; a header's merged cell repeated over its
+    columns, a body's merged cell in its first column).
+    forms (lane r8-overlay2, the user's rules TG3, TG13, TG14), each loosening one condition:
+      'label'  a body line whose only group reaches over several columns, or that holds one first-column group alone
+               above indented lines, is a merged label row: its group is one cell (a column line through it is no
+               fault, g), it is no merged body cell (d), it starts a row and the next line starts another (b);
+      'merge'  a group cut by column lines takes a merged cell over those columns where each of those lines holds in
+               the body lines above and below it (each has groups on both sides of the line and none across it);
+      'a2'     condition a judged on the body lines that hold groups in two or more columns only."""
+    if 'D5ON' in R8_CLUE_FLAGS and 'clues' in forms_tag(forms): forms=frozenset(forms)|{'D5'}   # (switch D5ON, off) TW16's sentence check in the clue form
+    ov=overlay_module()
+    flat=[it for L in lines for it in L['items']]
+    nl=len(lines); nc=len(fit['col_lines'])+1
+    head=set(header)
+    if not head:
+        for li in range(min(3,nl-1)):
+            if any(ov.complete_value(t) for b,t,e in lines[li]['items']): break
+            head.add(li)
+    groups=sorted(fit['groups'],key=lambda g:(g['line'],g['col'],g['box'][0]))
+    # (memo 1) the header is every line above the first body row: below the header found, the lines that carry no value
+    # and hold only short labels (four words or fewer each) join it, up to the first line carrying a value; a line
+    # holding a first-column group alone is a row label, the first body row, and stops it
+    def is_val_line(li): return any(ov.complete_value(' '.join(flat[i][1] for i in sorted(g['items'],key=lambda i:flat[i][0][0])))
+                                    for g in groups if g['line']==li and g['col']>0)
+    first_val=next((li for li in range(nl) if is_val_line(li)),None)
+    if first_val is not None:
+        li=max(head)+1 if head else 0
+        while li<first_val:
+            gs=[g for g in groups if g['line']==li]
+            if not gs or (all(g['col']==0 for g in gs)) or any(len(' '.join(flat[i][1] for i in g['items']).split())>4 for g in gs): break
+            head.add(li); li+=1
+    body=[li for li in range(nl) if li not in head]
+    # the pieces a column line cut out of one group of words (same line, same group of the overlay)
+    pieces=collections.defaultdict(list)
+    for g in groups: pieces[(g['line'],g.get('gi'))].append(g)
+    cut_groups=[ps for ps in pieces.values() if len(ps)>1]
+    # (TW22 with TW10, switches TW22 and TW22D, off; the setting TW22F13 / TW22F20, else 1.5, is the supervisor's) a clear
+    # gap is a gap wider than the table's normal word space (the median gap between successive words inside the overlay's
+    # groups on body lines, times the setting)
+    tw22=('TW22' in R8_CLUE_FLAGS or 'TW22D' in R8_CLUE_FLAGS) and 'PROC' in forms
+    if tw22:
+        _f22=1.3 if 'TW22F13' in R8_CLUE_FLAGS else 2.0 if 'TW22F20' in R8_CLUE_FLAGS else 1.5
+        _wg22=[]
+        for (li_,gi_),ps_ in pieces.items():   # a group of words of the overlay, all its pieces together
+            if li_ in body:
+                bx=sorted((list(flat[i][0]) for p_ in ps_ for i in p_['items']),key=lambda b_:b_[0])
+                _wg22+=[b2[0]-b1[2] for b1,b2 in zip(bx,bx[1:]) if b2[0]-b1[2]>0]
+        ws22=sorted(_wg22)[len(_wg22)//2] if _wg22 else None
+        def clear22(bxs,x):
+            # the gap a column line at x passes through among these word boxes: clear when no word lies across x and the
+            # gap between the nearest words on either side is wider than the setting times the word space
+            if any(b_[0]<x<b_[2] for b_ in bxs) or ws22 is None: return False
+            lf=[b_[2] for b_ in bxs if b_[2]<=x]; rt=[b_[0] for b_ in bxs if b_[0]>=x]
+            return bool(lf and rt) and min(rt)-max(lf)>_f22*ws22
+        if 'TW22D' in R8_CLUE_FLAGS:
+            # a column line that passes only through normal word spaces, in every row where words stand on both sides of
+            # it, is no column line: it is dropped and the columns on its two sides are one
+            _cl22=list(fit['col_lines']); drop22=set()
+            for c_,x in enumerate(_cl22):
+                rows_=[[list(flat[i][0]) for g in groups if g['line']==li for i in g['items']] for li in range(nl)]
+                both=[bs for bs in rows_ if any(b_[2]<=x for b_ in bs) and any(b_[0]>=x for b_ in bs) or any(b_[0]<x<b_[2] for b_ in bs)]
+                if ws22 is not None and both and not any(clear22(bs,x) for bs in both): drop22.add(c_)
+            if drop22:
+                nci=lambda c_: c_-sum(1 for d_ in drop22 if d_<c_)
+                rg=[dict(g,col=nci(g['col']),col_end=nci(g['col_end'])) for g in groups]
+                byk=collections.defaultdict(list)
+                for g in rg: byk[(g['line'],g.get('gi'))].append(g)
+                groups=[]
+                for ps_ in byk.values():
+                    ps_=sorted(ps_,key=lambda g:g['col']); cur=ps_[0]
+                    for g in ps_[1:]:
+                        if g['col']<=cur['col_end']:
+                            cur=dict(cur,col_end=max(cur['col_end'],g['col_end']),items=cur['items']+g['items'],box=hull([cur['box'],g['box']]))
+                        else: groups.append(cur); cur=g
+                    groups.append(cur)
+                groups=sorted(groups,key=lambda g:(g['line'],g['col'],g['box'][0]))
+                fit=dict(fit,col_lines=[x for c_,x in enumerate(_cl22) if c_ not in drop22],tw22_dropped=sorted(round(_cl22[c_]/k,1) for c_ in drop22))
+                nc=len(fit['col_lines'])+1
+                pieces=collections.defaultdict(list)
+                for g in groups: pieces[(g['line'],g.get('gi'))].append(g)
+                cut_groups=[ps for ps in pieces.values() if len(ps)>1]
+    def joined(ps):
+        u_=next((p_.get('underline') for p_ in ps if p_.get('underline')),None)
+        if 'T10D' in forms and u_ and ps[0]['line'] in head:   # (A2) TG10: a header label over its line keeps those columns
+            e_=[fit['x0']]+list(fit['col_lines'])+[fit['x1']]
+            cs_=[c_ for c_ in range(len(e_)-1) if min(u_[1],e_[c_+1])-max(u_[0],e_[c_])>=.5*(e_[c_+1]-e_[c_])]
+            if cs_: return dict(ps[0],col=min(cs_),col_end=max(cs_),items=[i for p_ in ps for i in p_['items']],box=hull(p_['box'] for p_ in ps),underline=u_)
+        return dict(ps[0],col=min(p_['col'] for p_ in ps),col_end=max(p_['col_end'] for p_ in ps),items=[i for p_ in ps for i in p_['items']],
+                    box=hull(p_['box'] for p_ in ps),underline=next((p_.get('underline') for p_ in ps if p_.get('underline')),None))
+    # 'trim' (second pass): the caption's own title lines at the top of the part (lines before the first line of two or
+    # more groups, each one group as wide as 60% of the table or opening with a table label) and note lines at its
+    # foot (one group alone opening with a note mark, the form LAYOUT_NOTE reads as notes) leave the fit; they print
+    # with the caption and the notes
+    trim_top=[]; trim_bottom=[]
+    if 'T1' in forms and 'trim' not in forms and 'B6' not in forms and head:
+        # T1 (TW20, the user's words: "Titles outside of the table ... are the titles"; the form for "outside" is the
+        # supervisor's): a top line the box caught, standing above the table's first row border (a drawn line or a change
+        # of shading) and carrying a title mark (half the table wide, a type family used nowhere else in the part, or the
+        # table label), is the title: it leaves the grid and prints with the caption, once
+        # the reference (the form's words): the table's top drawn line or top shading edge, whichever stands higher: the
+        # highest drawn line or fill across half the part's width or more; a line is outside when it stands wholly above it
+        _W=max(1.,fit['x1']-fit['x0'])
+        _ys=[gb[1] for gb,gk in (graphics or []) if (gb[2]-gb[0])>=.5*_W and (gk!='rule' or (gb[2]-gb[0])>=(gb[3]-gb[1]))]
+        _ref=min(_ys) if _ys else None
+        _top=max([li for li in range(nl) if _ref is not None and lines[li]['bot']<=_ref+.5],default=None)
+        def _famT(li):
+            fs=set()
+            for b_,t_,e_ in lines[li]['items']:
+                f_=e_.get('font') if isinstance(e_,dict) else None
+                for x_ in (f_ if isinstance(f_,list) else [f_]):
+                    if x_: fs.add(str(x_).split('+')[-1].split('-')[0])
+            return fs
+        if _top is not None:
+            for li in range(nl):
+                gs=[g for g in groups if g['line']==li]
+                if li>_top or not gs or len({g.get('gi') for g in gs})!=1: break
+                _bx=hull(b_ for b_,t_,e_ in lines[li]['items']); _tx=' '.join(t_ for b_,t_,e_ in sorted(lines[li]['items'],key=lambda it:it[0][0]))
+                # "a typeface used nowhere else in the table": the table is the part below its first row border
+                _rest=set().union(*[_famT(x) for x in range(_top+1,nl)]) if _top+1<nl else set()
+                if not _rest: _rest=set().union(*[_famT(x) for x in range(nl) if x!=li]) if nl>1 else set()   # no table below: the part's other lines
+                _mark=((_bx[2]-_bx[0])>=.5*(fit['x1']-fit['x0']) or (_famT(li) and not (_famT(li)&_rest))
+                       or bool(re.match(r'^\s*(?:e ?|Supplementa\w+ |Appendix )?(?:Table|TABLE|Tab\.)\s*[A-Z]?[\dIVX]',_tx,re.I)))
+                # T1L (a recorded switch, the builder's, off): the line also starts left of the first column line, as a
+                # title does and a heading over some columns does not
+                if _mark and 'T1L' in forms and fit['col_lines'] and _bx[0]>=fit['col_lines'][0]: _mark=False
+                if _mark:
+                    trim_top.append(li)
+                else: break
+        if trim_top:
+            drop_l=set(trim_top); head-=drop_l; body=[li for li in body if li not in drop_l]; groups=[g for g in groups if g['line'] not in drop_l]
+    # B6 is REPLACED by TW20 (T1, T2) on the user's ruling of 2026-11-18; its switch is kept only so old measures can
+    # be read again, and no form uses it
+    if 'B6' in forms and 'trim' not in forms and head:
+        # B6 (TW18): a title line caught inside the part (above the first header line, one group alone) set in the title's
+        # type, not the header's, leaves the part's box and prints with the caption. The type is told from the record:
+        # the median word height of the line against the header lines' (a ratio of 1.15 or more, or 0.87 or less), or a
+        # font family of its own (the family name without its subset tag)
+        def _hts(li): hs=sorted(b_[3]-b_[1] for b_,t_,e_ in lines[li]['items']); return hs[len(hs)//2] if hs else 0
+        def _fam(li):
+            fs=set()
+            for b_,t_,e_ in lines[li]['items']:
+                f_=e_.get('font') if isinstance(e_,dict) else None
+                for x_ in (f_ if isinstance(f_,list) else [f_]):
+                    if x_: fs.add(str(x_).split('+')[-1].split('-')[0])
+            return fs
+        # candidates: the top lines of the part, one group each; the reference: the header lines under them (or the
+        # first body lines when the header is all candidates)
+        for li in range(nl):
+            gs=[g for g in groups if g['line']==li]
+            if not gs or len({g.get('gi') for g in gs})!=1: break
+            ref=[x for x in sorted(head) if x>li and len({g.get('gi') for g in groups if g['line']==x})>1] or body[:3]
+            if not ref: break
+            hh=sorted(_hts(x) for x in ref); hm=hh[len(hh)//2]; hf=set().union(*[_fam(x) for x in ref])
+            r_=_hts(li)/hm if hm else 1
+            if r_>=1.15 or r_<=.87 or (_fam(li) and hf and not (_fam(li)&hf)): trim_top.append(li)
+            else: break
+        if trim_top:
+            drop_l=set(trim_top); head-=drop_l; body=[li for li in body if li not in drop_l]; groups=[g for g in groups if g['line'] not in drop_l]
+    if 'trim' in forms:
+        X0_,X1_=fit['x0'],fit['x1']; W_=max(1.,X1_-X0_)
+        def one_group(li):
+            gs=[g for g in groups if g['line']==li]
+            return gs if gs and len({g.get('gi') for g in gs})==1 else None
+        def ltext(li): return ' '.join(t for b,t,e in sorted(lines[li]['items'],key=lambda it:it[0][0]))
+        for li in range(nl):
+            gs=one_group(li)
+            if not gs: break
+            wide=max(g['box'][2] for g in gs)-min(g['box'][0] for g in gs)>=.6*W_
+            if wide or re.match(r'^\s*(?:Table|TABLE)\s*[A-Z]?\d',ltext(li)): trim_top.append(li)
+            else: break
+        for li in range(nl-1,-1,-1):
+            gs=one_group(li)
+            if not gs or li in trim_top or not LAYOUT_NOTE.match(ltext(li)): break
+            trim_bottom.insert(0,li)
+        if trim_bottom:   # a note goes on in the lines under its mark only as lines of one group: already taken
+            pass
+        if trim_top or trim_bottom:
+            drop_l=set(trim_top)|set(trim_bottom)
+            head-=drop_l; body=[li for li in body if li not in drop_l]
+            groups=[g for g in groups if g['line'] not in drop_l]
+            if not head:   # the header: the top lines left holding no value (at most three), as without the program's
+                rest=[li for li in range(nl) if li not in drop_l]
+                for li in rest[:3]:
+                    if any(ov.complete_value(t) for b,t,e in lines[li]['items']) or li==rest[-1]: break
+                    head.add(li)
+                body=[li for li in body if li not in head]
+    label_lines=set()
+    if 'label' in forms:
+        for li in body:
+            ps=[g for g in groups if g['line']==li]
+            if ps and len({g.get('gi') for g in ps})==1 and max(g['col_end'] for g in ps)>min(g['col'] for g in ps):
+                label_lines.add(li)   # one group alone over several columns
+            elif len(ps)==1 and ps[0]['col']==ps[0]['col_end']==0:
+                nxt=[g for g in groups if g['line']==li+1 and g['col']==0]
+                if li+1 in body and nxt and nxt[0]['box'][0]>=ps[0]['box'][0]+2*k: label_lines.add(li)   # alone above indented lines
+    # (memo 1) the foot: below the last line carrying values in two or more columns, a line of one group set in a
+    # smaller type than the value lines (under nine tenths of their height) or opening with a note mark is a note, not
+    # a label row: it leaves the grid and prints with the notes; a line of one group there that is neither is not
+    # certain (note or label row): foot_ok is False and the part stays a flagged list
+    foot_notes=[]; foot_ok=True
+    val2=[li for li in body if len({g['col'] for g in groups if g['line']==li and g['col']>0
+                                    and ov.complete_value(' '.join(flat[i][1] for i in g['items']))})>=2]
+    if val2:
+        hv=sorted(lines[li]['h'] for li in val2)[len(val2)//2]
+        for li in [x for x in body if x>max(val2)]:
+            gs=[g for g in groups if g['line']==li]
+            if not gs or len({g.get('gi') for g in gs})>1: continue
+            txt=' '.join(t for b,t,e in sorted(lines[li]['items'],key=lambda it:it[0][0]))
+            if lines[li]['h']<.9*hv or LAYOUT_NOTE.match(txt) or foot_notes: foot_notes.append(li)
+            elif txt[:1].islower(): continue   # a wrapped line of the row above (it opens in lower case), no label row
+            else: foot_ok=False
+        if foot_notes:
+            body=[li for li in body if li not in foot_notes]; groups=[g for g in groups if g['line'] not in foot_notes]
+            label_lines-=set(foot_notes)
+    def holds(li,x_col):   # the column line between columns x_col and x_col+1 holds on body line li
+        gs=[g for g in groups if g['line']==li]
+        return (bool(gs) and any(g['col_end']<=x_col for g in gs) and any(g['col']>x_col for g in gs)
+                and not any(g['col']<=x_col<g['col_end'] for g in gs))
+    # 'hspan' (second pass, TG10): a header label takes its span before g and d are judged: from its underline where it
+    # has one; else, in a header of two or more lines, from the lower header cells it stands over, where it is centred
+    # over them (within a fifth of their width) and no other group of its line reaches them
+    spanned=set()
+    edges0=[fit['x0']]+list(fit['col_lines'])+[fit['x1']]
+    def ul_cols(u):
+        cs=[c_ for c_ in range(nc) if min(u[1],edges0[c_+1])-max(u[0],edges0[c_])>=.5*(edges0[c_+1]-edges0[c_])]
+        return (min(cs),max(cs)) if cs else None
+    if 'hspan' in forms:
+        hl=sorted(head)
+        for key,ps in pieces.items():
+            li=key[0]
+            if li not in head: continue
+            gj=joined(ps) if len(ps)>1 else ps[0]
+            sp=ul_cols(gj['underline']) if gj.get('underline') else None
+            if sp and sp[0]<=gj['col'] and sp[1]>=gj['col_end']: spanned.add(key); continue
+            if len(hl)<2 or gj['col']==gj['col_end']: continue
+            lower=[g for g in groups if g['line'] in head and g['line']>li and gj['col']<=g['col'] and g['col_end']<=gj['col_end']]
+            if len({g['col'] for g in lower})<2: continue
+            lx0=min(g['box'][0] for g in lower); lx1=max(g['box'][2] for g in lower)
+            cent=abs((gj['box'][0]+gj['box'][2])/2-(lx0+lx1)/2)<=.2*(lx1-lx0)
+            others=[g for g in groups if g['line']==li and g.get('gi')!=key[1] and g['col_end']>=gj['col'] and g['col']<=gj['col_end']]
+            if cent and not others: spanned.add(key)
+    merged_ok=[]; unresolved=0
+    for ps in cut_groups:
+        li=ps[0]['line']
+        if li in label_lines or (li,ps[0].get('gi')) in spanned: merged_ok.append(ps); continue
+        c0=min(p_['col'] for p_ in ps); c1=max(p_['col_end'] for p_ in ps)
+        nb=[x for x in (li-1,li+1) if x in body]
+        if 'merge' in forms and li in body and nb and all(holds(x,xc) for x in nb for xc in range(c0,c1)): merged_ok.append(ps)
+        else: unresolved+=1
+    tw10_keys=set()
+    if 'T10A' in forms:
+        # TW10 with the user's ruling (A1, a switch, off in the built form): a column line cuts a group only where a word
+        # lies across it; through a clear gap, however narrow, the two sides are two cells (no fault); a cut through a
+        # word keeps the group whole as one cell in that row
+        _cl=sorted(fit['col_lines'])
+        for ps in cut_groups:
+            if any(ps is q_ for q_ in merged_ok): continue
+            c0_=min(p_['col'] for p_ in ps); c1_=max(p_['col_end'] for p_ in ps)
+            xs=[_cl[c_] for c_ in range(c0_,c1_) if c_<len(_cl)]
+            if any(flat[i][0][0]<x<flat[i][0][2] for p_ in ps for i in p_['items'] for x in xs):
+                merged_ok.append(ps); tw10_keys.add((ps[0]['line'],ps[0].get('gi')))
+        unresolved=0
+    if tw22 and 'TW22' in R8_CLUE_FLAGS:
+        # (TW22, TW10) the line stands where it passes through a clear gap: the two sides are two cells, no fault; in a row
+        # where it passes only a normal word space (or a word lies across it) it is taken out of that row: the group is
+        # one cell there
+        _cl=sorted(fit['col_lines'])
+        for ps in cut_groups:
+            if any(ps is q_ for q_ in merged_ok): continue
+            c0_=min(p_['col'] for p_ in ps); c1_=max(p_['col_end'] for p_ in ps)
+            xs=[_cl[c_] for c_ in range(c0_,c1_) if c_<len(_cl)]
+            bxs=[list(flat[i][0]) for p_ in ps for i in p_['items']]
+            if not all(clear22(bxs,x) for x in xs): merged_ok.append(ps); tw10_keys.add((ps[0]['line'],ps[0].get('gi')))
+        unresolved=0
+    if merged_ok:
+        drop={id(p_) for ps in merged_ok for p_ in ps}
+        groups=sorted([g for g in groups if id(g) not in drop]+[joined(ps) for ps in merged_ok],key=lambda g:(g['line'],g['col'],g['box'][0]))
+    text=lambda g:' '.join(flat[i][1] for i in sorted(g['items'],key=lambda i:flat[i][0][0]))
+    # a: the columns of the upper and the lower half of the body
+    a=False; halves=None
+    abody=[li for li in body if len({g['col'] for g in groups if g['line']==li})>=2] if 'a2' in forms else body
+    if 'T10E' in forms:   # (A4) lines beside one leftmost cell (nothing in the leftmost column, values of their own: the
+        # landed sub-row form) are left out of the halves of condition a
+        abody=[li for li in abody if any(g['col']==0 for g in groups if g['line']==li) or not any(ov.complete_value(text(g)) for g in groups if g['line']==li and g['col']>0)]
+    if len(abody)>=4:
+        h=len(abody)//2
+        f1=ov.fit([lines[li] for li in abody[:h]],graphics,k); f2=ov.fit([lines[li] for li in abody[h:]],graphics,k)
+        halves=[[round(x/k,1) for x in f['col_lines']] if f else None for f in (f1,f2)]
+        same=lambda f: bool(f) and len(f['col_lines'])==nc-1 and all(
+            sum(x<g['box'][0] for x in f['col_lines'])==sum(x<g['box'][0] for x in fit['col_lines']) and
+            sum(x<g['box'][2] for x in f['col_lines'])==sum(x<g['box'][2] for x in fit['col_lines']) for g in f['groups'])
+        a=same(f1) and same(f2)
+        if 'T10A' in forms:   # (A1) a line stands in a row unless a word lies across it; (B5) a line parting nothing is dropped
+            def eff10(cl, rows_items):
+                out_=[]
+                for x in cl:
+                    for bs in rows_items:
+                        if any(b_[0]<x<b_[2] for b_ in bs): continue
+                        if 'T10B' not in forms or (any(b_[2]<=x for b_ in bs) and any(b_[0]>=x for b_ in bs)): out_.append(x); break
+                return out_
+            Lw10=eff10(fit['col_lines'],[[b_ for b_,t_,e_ in lines[li]['items']] for li in body])
+            def same10(f_,sub):
+                if not f_: return False
+                Lh=eff10(f_['col_lines'],[[b_ for b_,t_,e_ in lines[li]['items']] for li in sub])
+                if len(Lh)!=len(Lw10): return False
+                return all(sum(1 for x in Lw10 if x<=b_[0]+.5)==sum(1 for x in Lh if x<=b_[0]+.5) for li in sub for b_,t_,e_ in lines[li]['items'])
+            a=same10(f1,abody[:h]) and same10(f2,abody[h:])
+            if 'T10C' in forms and (not f1 or not f2): a=True
+    elif 'T10C' in forms:   # (A3) too few lines for the two halves: a is judged on the whole body (the fit itself)
+        a=True
+    b=bool(body) and all(len({g['col'] for g in groups if g['line']==li})>=2 for li in body)
+    # b': as b, except a line holding one first-column group alone that opens nested lines (the next body line's
+    # first-column group stands indented under it, 2 pt or more): a group label, not a wrapped cell
+    pos={li:q for q,li in enumerate(fit['line_of_row'])}
+    colR0=max((g['box'][2] for g in groups if g['col']==g['col_end']==0),default=0)
+    def opens(li):
+        gs=[g for g in groups if g['line']==li]
+        nxt=[g for g in groups if g['line']==li+1 and g['col']==0]
+        above=[g for g in groups if g['line']==li-1 and g['col']==0]
+        if not (len(gs)==1 and gs[0]['col']==gs[0]['col_end']==0 and li+1 in body and nxt and nxt[0]['box'][0]>=gs[0]['box'][0]+2*k):
+            return False
+        # and it starts a cell: a drawn line or a change of shading parts it from the line above, or its first word
+        # would have fitted after the first-column text of the line above
+        q=pos.get(li-1)
+        if not above or (q is not None and q<len(fit['drawn']) and pos.get(li)==q+1 and fit['drawn'][q]): return True
+        first=min(gs[0]['items'],key=lambda i:flat[i][0][0])
+        fw=flat[first][0][2]-flat[first][0][0]
+        return max(g['box'][2] for g in above)+3*k+fw<colR0-k
+    b2=bool(body) and all(len({g['col'] for g in groups if g['line']==li})>=2 or opens(li) or li in label_lines for li in body)
+    pos={li:q for q,li in enumerate(fit['line_of_row'])}
+    c=len(body)>=2 and all(fit['drawn'][pos[li]] for li,lj in zip(body,body[1:]) if li in pos and lj==li+1) \
+        and all(lj==li+1 for li,lj in zip(body,body[1:]))
+    body_ink=collections.defaultdict(list)
+    for g in groups:
+        if g['line'] in body and g['col']==g['col_end']: body_ink[g['col']].append(g['box'])
+    # r: row lines keep off the words (TG2): no two successive printed lines overlap by more than a quarter of the
+    #    line height (cells centred at half-line offsets make lines that no full-width row line can part)
+    r_ok=all(min(lines[q]['bot'],lines[q+1]['bot'])-max(lines[q]['top'],lines[q+1]['top'])<=.25*min(lines[q]['h'],lines[q+1]['h'])
+             for q in range(nl-1))
+    # g: no column line cuts a group of words (TG2)
+    g_ok=fit['counts'].get('groups_cut',0)==0 or (bool(forms) and unresolved==0)
+    # n: the last body line is no note: not one group alone parted from the line above by a drawn line or shading
+    lastb=body[-1] if body else None
+    n_ok=not (lastb is not None and len([g for g in groups if g['line']==lastb])==1 and pos.get(lastb) and fit['drawn'][pos[lastb]-1])
+    hmerged=[g for g in groups if g['line'] in head and g['col']!=g['col_end']]
+    ok_merged={(ps[0]['line'],ps[0].get('gi')) for ps in merged_ok}
+    lone_top=None
+    if 'T2' in forms and head:
+        # T2 (TW20, the user's words: "where the "title" is in the table itself. It can be called a header"): the first
+        # line of the head, one group alone at its level with a column-heading line (two or more groups) under it, is a
+        # header row over the whole table; it stays in the grid and is no fault of d or of the settled header
+        h0=min(head); g0=[g for g in groups if g['line']==h0]
+        if len({g.get('gi') for g in g0})==1 and len({g.get('gi') for g in groups if g['line']==h0+1})>=2: lone_top=h0
+    d=(not any(g['col']!=g['col_end'] and g['line'] not in label_lines and (g['line'],g.get('gi')) not in ok_merged for g in groups if g['line'] in body)
+       # each merged header cell stands over body ink in every column it covers, and over less than half the columns
+       # (a line across half the table or more at its top is a caption or a title, rule G6)
+       and all(((g['line'],g.get('gi')) in spanned) or (((g['line'],g.get('gi')) in tw10_keys) and 2*(g['col_end']-g['col']+1)<nc) or (all(any(min(bx[2],g['box'][2])>max(bx[0],g['box'][0]) for bx in body_ink[c_]) for c_ in range(g['col'],g['col_end']+1))
+               and 2*(g['col_end']-g['col']+1)<nc) for g in hmerged if g['line']!=lone_top)
+       # a header cell set on two lines keeps one span: no header group stands on the line above a merged header cell
+       # over part of its span without spanning the same columns
+       and not any(h['line']==g['line']-1 and h['col']<=g['col_end'] and h['col_end']>=g['col'] and (h['col'],h['col_end'])!=(g['col'],g['col_end'])
+                   and (h['line'],h.get('gi')) not in spanned for g in hmerged for h in groups if h['line'] in head)
+       # the part holds no caption line: no line opens with a table or figure label (TF7; the label is the caption's)
+       and not any(re.match(r'^\s*(?:Table|TABLE|Fig\.?|Figure|FIGURE)\s*[A-Z]?\d',' '.join(t for b,t,e in lines[li]['items'])) for li in range(nl) if li not in trim_top and li not in trim_bottom))
+    # Header spans (TG10, the user's ruling 4): a drawn line under a header label is the first witness of its span:
+    # the label stands over exactly the columns its underline covers (half a column's width or more); with no such
+    # line the overlay's own placement stays (a merged cell over the columns it covers).
+    edges=[fit['x0']]+list(fit['col_lines'])+[fit['x1']]
+    def ul_span(g):
+        u=g.get('underline')
+        if not u: return None
+        cs=[c_ for c_ in range(nc) if min(u[1],edges[c_+1])-max(u[0],edges[c_])>=.5*(edges[c_+1]-edges[c_])]
+        return (min(cs),max(cs)) if cs else None
+    # Cell rows (TG12, the user's rule of record; second send-back): a row is as tall as its tallest cell. Each body
+    # boundary between two successive printed lines is decided by marks on the page:
+    #   new row, certain: a drawn line, a change of shading or a white gap line between them; the lower line carries
+    #     values in two or more columns; or its first-column group starts a cell (the first column above is empty, or
+    #     ends closed and the lower group's first word would have fitted after it within the column);
+    #   continuation, certain: the lower line carries no new row mark above and every group of it goes on a cell of the
+    #     line above in its column: it opens in lower case, or the cell above is left open (a hyphen, a comma, a joining
+    #     word), or its first word would not have fitted on the line above within the column while the lower line
+    #     carries no value of its own and the line above is no complete row of values (values in two or more columns).
+    # A boundary with both kinds of marks, or with none, is undecided. Header lines form one header row, parted into
+    # tiers only by a drawn line or a change of shading; a header label set on several lines is one cell.
+    OPEN=re.compile(r'(?:[^\W\d_][-‐‑]|[&(\[,]|\b(?:and|or|of|the|in|with|to|for|at|by|vs\.?|from|per|on|a|an))$',re.I)   # (a value's sign, '65+', is no open cell)
+    byline=collections.defaultdict(list)
+    for g in groups: byline[g['line']].append(g)
+    def first_word(g):
+        i0=min(g['items'],key=lambda i:flat[i][0][0]); return flat[i0][0][2]-flat[i0][0][0],flat[i0][1]
+    def fits(ab,g):   # g's first word would have fitted after group ab within ab's column
+        fw,_=first_word(g); return ab['box'][2]+2.5*k+fw<=edges[ab['col_end']+1]-.5*k
+    def above_in(li,c):
+        xs=[x for x in byline[li] if x['col']<=c<=x['col_end']]
+        return max(xs,key=lambda x:x['box'][2]) if xs else None
+    # Pass 3 marks (recorded at every body boundary as marks2; used for the decision only under their form):
+    #   band   (TG10) both lines in one band of one colour, no drawn line or change between them: the lower line, when it
+    #          carries no value of its own, goes on the cell above (cont);
+    #   shade2 (TG7) a change of shading read in colour, whatever its strength (new);
+    #   gap    (TF2) where the white gaps between the table's body lines fall into two clear sizes (each size twice or
+    #          more, the larger at least 1.8 times the smaller and a third of a line height more), a gap of the larger
+    #          size is a row border (new), one of the smaller size is inside a cell (cont);
+    #   cent   (TG12) values centred beside a row label set on two lines: a line of values with no first-column group
+    #          standing between two first-column-only lines, less than a line height from each: one row (cont, cont).
+    rr=fit.get('row_rgb') or []; sh2=fit.get('shade2') or []
+    gaps_={li:lines[li+1]['top']-lines[li]['bot'] for li in body if li+1 in body}
+    gap_cut=None
+    gv=sorted(gaps_.values())
+    if len(gv)>=4:
+        hmed=sorted(L['h'] for L in lines)[len(lines)//2]
+        best=None
+        for i_ in range(1,len(gv)):
+            A_,B_=gv[:i_],gv[i_:]
+            if len(A_)>=2 and len(B_)>=2 and B_[0]>=1.8*max(A_[-1],.5) and B_[0]-A_[-1]>=hmed/3:
+                if best is None or B_[0]-A_[-1]>best[1]: best=((A_[-1]+B_[0])/2,B_[0]-A_[-1])
+        if best: gap_cut=best[0]
+    cent_pairs=set()
+    for li in body:
+        lj,lk=li+1,li+2
+        if lj in body and lk in body:
+            g_i,g_j,g_k=byline[li],byline[lj],byline[lk]
+            only0=lambda gs: bool(gs) and all(g['col']==0 for g in gs)
+            if (only0(g_i) and only0(g_k) and g_j and not any(g['col']==0 for g in g_j)
+                    and len({g['col'] for g in g_j if ov.complete_value(text(g))})>=2
+                    and lines[li]['vc']<lines[lj]['vc']<lines[lk]['vc'] and lines[lk]['top']-lines[li]['bot']<1.5*max(lines[li]['h'],lines[lk]['h'])):
+                cent_pairs.update({li,lj})
+    # a band is bounded: the run of rows under the colour of row q ends, above and below, in another colour, in white or
+    # at a drawn line, and does not hold the whole body (shading down a column, not over rows, is no band: AP23 p7)
+    body_q=sorted(pos[li] for li in body if li in pos)
+    def same_rgb(x,y): return x is not None and y is not None and max(abs(x[i]-y[i]) for i in range(3))<6
+    def band_bounded(q):
+        if not body_q: return False
+        lo=q
+        while lo-1>=body_q[0] and lo-1<len(rr) and same_rgb(rr[lo-1],rr[q]) and not fit['drawn'][lo-1]: lo-=1
+        hi=q
+        while hi+1<=body_q[-1] and hi+1<len(rr) and same_rgb(rr[hi+1],rr[q]) and not fit['drawn'][hi]: hi+=1
+        return not (lo<=body_q[0] and hi>=body_q[-1])
+    # Row clues of the user (lane r9-rowclues, rules TW1-TW6), recorded at every body boundary as marks2 and used for
+    # the decision only under their form:
+    #   TW1   the lower line opens with a round or square bracket (or a mark like them): a wrapped line of the cell above
+    #         (cont); it overrides 'values' (a range or spread in brackets under a value);
+    #   TW2   the lower line opens with a capital letter in the leftmost column: a new row (new); a capital in another
+    #         column says nothing;
+    #   TW345 the leftmost column's texts are set at the top, the bottom or the centre of their cells; a reading fits the
+    #         table when every row border it gives stands in white across the table (crosses no word box of any body
+    #         line); the boundary is new where a border of the fitting reading(s) stands between the two lines' centres,
+    #         cont where none does; silent where no reading fits or the fitting readings disagree;
+    #   TW6   (applied last, only to a boundary still undecided) two lines between the same two row borders with no
+    #         border between them are one row (cont); a border is a drawn line or a change of shading across the
+    #         table; it speaks only in a part with two or more such borders.
+    BRK=('(', '[', '\uff08', '\uff3b')   # round and square brackets (full-width forms too); '<' is a sign, not a bracket
+    def ltxt(li): return ' '.join(text(g) for g in sorted(byline[li],key=lambda g:g['box'][0]))
+    texts0=[]   # the leftmost column's texts: lists of body line indexes
+    for li in body:
+        g0_=[g for g in byline[li] if g['col']==0]
+        if not g0_: continue
+        t0_=text(min(g0_,key=lambda g:g['box'][0]))
+        prev0=texts0[-1] if texts0 else None
+        goes_on=(prev0 is not None and prev0[-1]==li-1 and (tw24_lower(t0_) or t0_[:1] in BRK
+                 or bool(OPEN.search(' '.join(text(g) for g in byline[li-1] if g['col']==0)))))
+        if goes_on: prev0.append(li)
+        else: texts0.append([li])
+    boxes_all=[it[0] for li in body for it in lines[li]['items']]
+    def top_(t): return min(lines[li]['top'] for li in t)
+    def bot_(t): return max(lines[li]['bot'] for li in t)
+    def cen_(t): return (top_(t)+bot_(t))/2
+    readings={}
+    if len(texts0)>=2:
+        for nm_,ys in (('top',[top_(t)-.5*k for t in texts0[1:]]),('bottom',[bot_(t)+.5*k for t in texts0[:-1]]),
+                       ('centre',[(cen_(a)+cen_(b))/2 for a,b in zip(texts0,texts0[1:])])):
+            if all(not any(b[1]+.3*k<y<b[3]-.3*k for b in boxes_all) for y in ys): readings[nm_]=ys
+    if 'D6' in forms and texts0:
+        # (D6) the setting read from the page: lines with nothing in the leftmost column after the last leftmost text
+        # only -> top; before the first only -> bottom; both -> centre; neither -> no reading; that one reading is used
+        _bef=any(li<texts0[0][0] and not any(g['col']==0 for g in byline[li]) for li in body)
+        _aft=any(li>texts0[-1][-1] and not any(g['col']==0 for g in byline[li]) for li in body)
+        _set='centre' if (_bef and _aft) else 'top' if _aft else 'bottom' if _bef else None
+        readings={_set:readings[_set]} if _set in readings else {}
+    def tw345(li,lj):
+        if not readings: return None
+        ca,cb=lines[li]['vc'],lines[lj]['vc']
+        vs={nm_:any(ca<y<cb for y in ys) for nm_,ys in readings.items()}
+        if len(set(vs.values()))!=1: return None
+        return 'new' if list(vs.values())[0] else 'cont'
+    borders_q=[q for q in range(len(fit['drawn'])) if fit['drawn'][q] or (q<len(sh2) and sh2[q])]
+    def tw6(li,lj):
+        qa_,qb_=pos.get(li),pos.get(lj)
+        if qa_ is None or qb_ is None or len(borders_q)<2: return None
+        if qa_ in borders_q: return None
+        above=any(q<qa_ for q in borders_q); below=any(q>=qb_ for q in borders_q) or lj==body[-1]
+        return 'cont' if above and below else None
+    # (B8, TW18) a short code: one token of at most four characters, or a value (a number, a range, a percentage)
+    def _short(t): t=t.strip(); return ov.complete_value(t) or (len(t.split())==1 and len(t)<=4)
+    marks2={}
+    decisions={}
+    lift0=set()   # (TW8) body lines whose leftmost text joins the leftmost cell of the row above
+    d7lines=set()   # (D7) body lines printed as a line of their own beside one leftmost cell
+    for li,lj in zip(body,body[1:]):
+        if lj!=li+1: decisions[li]=(None,['not adjacent']); continue
+        low=byline[lj]; marks_new=[]; marks_cont=[]
+        m2={}
+        qa,qb=pos.get(li),pos.get(lj)
+        drawn_ab=qa is not None and qa<len(fit['drawn']) and qb==qa+1 and fit['drawn'][qa]
+        ch2=qa is not None and qa<len(sh2) and qb==qa+1 and sh2[qa]
+        if ch2: m2['shade2']='new'
+        vals_low={g['col'] for g in low if ov.complete_value(text(g))}
+        if (qa is not None and qb is not None and qa<len(rr) and qb<len(rr) and rr[qa] and rr[qb] and not drawn_ab and not ch2
+                and max(abs(rr[qa][i]-rr[qb][i]) for i in range(3))<6 and not vals_low and band_bounded(qa)): m2['band']='cont'
+        if gap_cut is not None and li in gaps_: m2['gap']='new' if gaps_[li]>gap_cut else 'cont'
+        if li in cent_pairs: m2['cent']='cont'
+        lowsorted=sorted(low,key=lambda g:g['box'][0])
+        g0w=[g for g in low if g['col']==0]
+        # TW1 (the user's words, corrected 2026-11-17): only in the leftmost column, and only when the bracket starts the
+        # new line there: a leftmost text that opens with a round or square bracket is a wrapped line of the leftmost cell
+        # above; nowhere else, and not for a bracket behind other text
+        if g0w and text(min(g0w,key=lambda g:g['box'][0]))[:1] in BRK and ('D8' in forms or any(g['col']==0 for g in byline[li])): m2['TW1']='cont'   # (D8) as the user wrote it
+        if not g0w: m2['empty0']=1
+        if vals_low: m2['vals_low']=len(vals_low)
+        if g0w and text(min(g0w,key=lambda g:g['box'][0]))[:1].isupper() and not (
+                'TW25C' in R8_CLUE_FLAGS and tw25_place(' '.join(text(g) for g in sorted(g0w,key=lambda g:g['box'][0])))):   # (TW25C) a place name's capital is no clue
+            m2['TW2']='new'
+            # TW2o: as TW2, except under a leftmost text left open (a comma, an open bracket, a joining word)
+            # (memo clues-1) a raised mark at the end of the leftmost text above (one or two characters set smaller and
+            # higher than the line's words, a note mark) is no word: it leaves the text open by no joining word
+            ui=sorted((flat[i] for g in byline[li] if g['col']==0 for i in g['items']),key=lambda it:it[0][0])
+            hs_=sorted(b_[3]-b_[1] for b_,t_,e_ in lines[li]['items']); bs_=sorted(b_[3] for b_,t_,e_ in lines[li]['items'])
+            if hs_:
+                hm_=hs_[len(hs_)//2]; bm_=bs_[len(bs_)//2]
+                while len(ui)>1 and len(ui[-1][1].strip())<=2 and ui[-1][0][3]-ui[-1][0][1]<.75*hm_ and ui[-1][0][3]<bm_-.15*hm_: ui.pop()
+            up0=' '.join(t_ for b_,t_,e_ in ui)
+            if not (up0 and (OPEN.search(up0) or up0.count('(')>up0.count(')'))): m2['TW2o']='new'
+        v345=tw345(li,lj)
+        if v345: m2['TW345']=v345
+        v6=tw6(li,lj)
+        if v6: m2['TW6']=v6
+        # TW17 (the user's region check), read for the clue forms: a row division between the two lines (a drawn line, a
+        # change of shading going down the table, or a white gap over the set times the table's usual line gap, read in
+        # the part's own frame); the columns after the leftmost where text runs on from the one line into the next (the
+        # lower text starts with a small letter, or the upper text ends open)
+        if any(f_.startswith('PROC') for f_ in forms):
+            _q=pos.get(li)
+            m2['div']=bool(drawn_ab or ch2 or (_q is not None and _q<len(fit['drawn']) and fit['drawn'][_q]))
+            m2['gap']=round(lines[lj]['top']-lines[li]['bot'],1)
+            _ro=[]; _rl=[]
+            for g in low:
+                if g['col']==0: continue
+                ab=above_in(li,g['col'])
+                if ab is None or ab['col']==0: continue
+                if 'B8' in forms and (_short(text(g)) or _short(text(ab))): continue   # (B8) a short code is a value
+                if tw24_lower(text(g)) or OPEN.search(text(ab)): _ro.append(g['col'])
+                if tw24_lower(text(g)): _rl.append(g['col'])
+            m2['runon']=sorted(set(_ro)); m2['runon_low']=sorted(set(_rl))
+            _oth=[g for g in low if g['col']>0]
+            if g0w and not _oth: m2['alone0']=1   # a leftmost text with nothing beside it on its line
+            m2['values']=bool(_oth) and all(ov.complete_value(text(g)) or (len(text(g).split())==1 and len(text(g))<=4) for g in _oth)
+            # (2c, F9, B7, a switch B7ANY, off) "the columns beside it hold their own numbers or short codes on that line":
+            # the line holds a number or a short code of its own in some column beside the leftmost (P-B7)
+            if 'B7ANY' in R8_CLUE_FLAGS and 'PROC' in forms:
+                m2['values']=any(ov.complete_value(text(g)) or (len(text(g).split())==1 and len(text(g))<=4) for g in _oth)
+        marks2[li]=m2
+        q=pos.get(li)
+        if q is not None and q<len(fit['drawn']) and fit['drawn'][q]: marks_new.append('border')
+        vals={g['col'] for g in low if ov.complete_value(text(g))}
+        if len(vals)>=2: marks_new.append('values')
+        g0=next((g for g in low if g['col']==0),None)
+        if g0 is not None:
+            a0=above_in(li,0)
+            t0=text(g0)
+            if a0 is None: marks_new.append('first column starts under an empty cell')
+            elif not OPEN.search(text(a0)) and not t0[:1].islower() and fits(a0,g0): marks_new.append('first column starts (would have fitted above)')
+        # (the 'would not have fitted' mark speaks only under a line that is no complete row of values: under a line
+        #  carrying values in two or more columns a long first-column label is a new label, AU16 p4 'Marital status')
+        vals_above=len({g['col'] for g in byline[li] if ov.complete_value(text(g))})
+        conts=[]
+        for g in low:
+            ab=above_in(li,g['col']); t=text(g)
+            if ab is None: conts.append(False); continue
+            # (send-back of lane r8-turned, TG12: a wrapped line stays in its cell; a group that opens with a bracket
+            #  under a filled cell, a bracketed number or qualifier, goes on the cell above: AX10 p16 '(171)')
+            conts.append(tw24_lower(t) or t[:1] in '([' or bool(OPEN.search(text(ab))) or (not vals and vals_above<2 and not fits(ab,g)))
+        if low and all(conts) and not marks_new: marks_cont.append('continues')
+        elif low and all(conts): marks_cont.append('continues (against a new-row mark)')
+        if 'rowlabel' in forms and lj in body and not any(g['col']==0 for g in low) and len({g['col'] for g in low})>=2 and not any(conts):
+            marks_new.append('row beside a first-column label')
+        for nm_,v_ in m2.items():
+            if nm_ in forms and nm_!='TW6': (marks_new if v_=='new' else marks_cont).append(nm_)
+        if 'TW1' in forms and m2.get('TW1'):   # TW1 overrides 'values' and the other new-row marks; a certain border still wins
+            marks_new=[x for x in marks_new if x=='border']
+        if lj in label_lines: marks_new.append('label row')
+        if li in label_lines: marks_new=marks_new+['under a label row']; marks_cont=[]
+        if 'border' in marks_new and marks_cont and any(x in forms for x in ('TW1','TW2','TW345')):
+            marks_cont=[]   # (TW) a certain border wins over a clue; the place is listed by the gate
+        if 'TW6' in forms and not marks_new and not marks_cont and m2.get('TW6'): marks_cont.append('TW6')
+        # The clues run in order as one procedure (measured, not built): (a) a drawn line or a change of shading is a new
+        # row; (b) TW1; (c) TW2 (as the user wrote it; PROCo: with the builder's exception for a leftmost text left open); (d) a line with
+        # nothing in the leftmost column belongs to the row the leftmost texts set (TW3-TW5); (e) TW6. The unruled case
+        # (lines with their own values beside one leftmost text, no border) is read (i) as one row or (ii) as sub-rows.
+        pf=[f_ for f_ in forms if f_.startswith('PROC')]
+        if 'PROCu' in forms:   # the user's order (TW6 corrected): TW1, TW2, TW3-TW5 first; lines and shading only after
+            pv=None
+            if m2.get('TW1'): pv='cont'
+            elif (m2.get('TW2') if 'PROCuX' in forms else m2.get('TW2o')): pv='new'   # TW2o: builder's addition, a switch
+            elif m2.get('empty0') and m2.get('TW345'): pv=m2['TW345']
+            elif drawn_ab or ch2: pv='new'
+            elif m2.get('TW6'): pv='cont'
+            if pv: marks_new,marks_cont=(['procedure'],[]) if pv=='new' else ([],['procedure'])
+        elif pf:
+            pv=None
+            # (TW1, with TW8's reading of the lines beside the cell) a bracket line in the leftmost column is a wrap of the
+            # leftmost cell above, also with values of its own; a line or a change of shading between them wins (TW12).
+            # A leftmost text that starts with a small letter goes on in the leftmost cell above too (the cell runs down to the next leftmost text with a capital; builder's reading: a text that starts
+            # with a figure or a sign is left to the other marks). A wrap line with values of its own in other columns
+            # prints as the landed program prints sub-rows beside one leftmost cell: its leftmost text joins the leftmost
+            # cell above, its other cells are a sub-row of their own (TW7: both forms are right); a wrap line without
+            # values of its own goes on in the row above (its other texts are wraps too: AR20 p7 'phagocytosis').
+            wrap0=bool(m2.get('TW1')) or bool(g0w and tw24_lower(text(min(g0w,key=lambda g:g['box'][0])))
+                                              and any(g['col']==0 for g in byline[li]))
+            # TW12 (the user's ruling): a drawn line or a change of shading between the two lines decides first, the
+            # bracket clue (TW1) and the bracket label (TW9) are read only where neither stands between them.
+            # TW9 (the user's ruling): a leftmost text that opens with a number or a letter in brackets with text after
+            # it (an asterisk is no text) is a label: a row of its own, not a wrap.
+            m9=re.match(r'^[(\[]\s*(?:\d{1,3}|[A-Za-z])\s*[)\]]\s*(.*)$',' '.join(text(g) for g in sorted(g0w,key=lambda g:g['box'][0]))) if g0w else None
+            tw9=bool(m9 and m9.group(1).replace('*','').strip())
+            if tw9: m2['TW9']='new'
+            if drawn_ab or ch2:
+                pv='new'
+                if m2.get('TW1'): m2['TW1_under_line_or_shading']=1
+            elif tw9: pv='new'
+            elif wrap0:
+                if vals_low-{0}:
+                    pv='new'
+                    # (2d, TW3, a switch SLW3, off) a leftmost text that starts with a small letter and carries values of its
+                    # own on its line is a text of the leftmost column: its top is the top border of its row (TW3), so it
+                    # stays in its own row's leftmost cell; only a bracket line (TW1) is a wrap of the cell above
+                    if not ('SLW3' in R8_CLUE_FLAGS and 'PROC' in forms and not m2.get('TW1')): lift0.add(lj)   # values of its own in other columns: a sub-row
+                else: pv='cont'
+            elif ('TW5C' in R8_CLUE_FLAGS and 'PROC' in forms and m2.get('TW2') and m2.get('TW345')=='cont'
+                  and 'centre' in readings and not any(g['col']==0 for g in byline[li])):
+                # (2c, F9, TW5, a switch TW5C, off) where the leftmost column is set in the centre of its cells (the only
+                # setting that fits), the row border stands midway between two leftmost centres: a leftmost text with a
+                # capital (TW2) opens its row at that border, so the line above it with an empty leftmost cell is in its row
+                pv='cont'
+            elif (m2.get('TW2o') if 'PROCo' in forms else m2.get('TW2')): pv='new'   # TW2 as the user wrote it; the builder's open-end exception only in the recorded form cluesO
+            elif m2.get('empty0'):
+                if ('D7L' in R8_CLUE_FLAGS and 'PROC' in forms and 'D7' in forms and li in d7lines and low
+                        and not any(conts) and not m2.get('values')):
+                    # (2d, TW7, a switch D7L, off) under a line printed as a line of its own beside the leftmost cell (D7),
+                    # a line with nothing in the leftmost column that does not go on from it is a line of its own too
+                    # ("individual for each line"), not glued to that value line (AU03 p5, p7)
+                    pv='new'
+                elif 'D7' in forms and any(g['col']>0 and not cn and ov.complete_value(text(g)) for g,cn in zip(low,conts)):
+                    # (D7, TW7, corrected after memo clues-2) a line with nothing in the leftmost column and an entry of
+                    # its own beside it (a value that does not go on from the line above) is a line of its own beside the
+                    # one leftmost cell (the landed sub-row form), so its entries keep their partners; other lines (text
+                    # that goes on, or text alone) are left to TW3-TW5 and the rest of the order
+                    pv='new'; d7lines.add(lj)
+                elif m2.get('vals_low') and 'PROCii' in forms: pv='new'
+                elif m2.get('vals_low') and 'PROCi' in forms: pv='cont'
+                elif m2.get('TW345'): pv=m2['TW345']
+                elif ('TW7B' in R8_CLUE_FLAGS and 'PROC' in forms and m2.get('values')
+                      and all(cn for g,cn in zip(low,conts) if g['col']>0)):
+                    # (2c, F9, TW7, a switch TW7B, off) a line of values with nothing in the leftmost column whose values go
+                    # on from the values above (a spread in brackets under a value): under the leftmost text above, its
+                    # values with their partners (TW7: a row each or under the leftmost text above, both right)
+                    pv='cont'
+            if pv is None and m2.get('TW6'): pv='cont'
+            if pv: marks_new,marks_cont=(['procedure'],[]) if pv=='new' else ([],['procedure'])
+        if ('D5' in forms and (m2.get('runon_low') if 'D5L' in R8_CLUE_FLAGS else m2.get('runon')) and marks_new and not marks_cont and not (drawn_ab or ch2)
+                and 'border' not in marks_new):   # (D5) TW16: a row never cuts through a sentence of another column
+            marks_new=[]; marks_cont=['TW16 sentence runs on']; lift0.discard(lj)
+        if marks_new and marks_cont: decisions[li]=(None,marks_new+marks_cont)
+        elif marks_new: decisions[li]=('new',marks_new)
+        elif marks_cont: decisions[li]=('cont',marks_cont)
+        else: decisions[li]=(None,['no mark'])
+    rg_=[f_ for f_ in forms if f_.startswith('RG')]
+    if rg_ and decisions:
+        # TW17 (the user's words, 2026-11-17, with the addition on white gaps): lines and shading, and large white gaps,
+        # set the row divisions; a region is the body between two successive divisions. Where some column after the
+        # leftmost holds text that runs on over the set number of lines with no division between them (a text region),
+        # the second run of the rules is not made: the region is one row. Elsewhere the second run stands as built.
+        # Settings (switches): RGN the column beside the leftmost (built, the user's words "the next column") / RGA any
+        # column (a recorded form); RGK2/3/4 lines; RGG125/150/200 gap times the usual line gap. VM: the value
+        # mark (a recorded form only): inside a region a capital opens a row only beside values of its own.
+        anyc='RGA' in forms
+        kk=next((int(f_[3:]) for f_ in rg_ if f_.startswith('RGK')),2)
+        # (2a, F7, a switch TW17K3, off) "a large number of text in a continuous pattern": text that runs on over three
+        # lines or more; one sentence wrapped once (two lines) is not a text region, so the second run is made (picture 21)
+        if 'TW17K3' in R8_CLUE_FLAGS and 'PROC' in forms: kk=max(kk,3)
+        gf=next((int(f_[3:])/100 for f_ in rg_ if f_.startswith('RGG')),2.0)
+        ks=sorted(decisions)
+        # the reference (the user's words): the spacing between the lines of a continuous wrapped sentence in the table,
+        # the median gap at the boundaries where a cell's text runs on and nothing divides; a table with no such pair
+        # takes the gap below which a quarter of its body gaps fall (its tightest common spacing)
+        wl=sorted(marks2[x]['gap'] for x in ks if marks2.get(x,{}).get('runon') and not marks2[x].get('div'))
+        gl=sorted(marks2[x]['gap'] for x in ks if 'gap' in marks2.get(x,{}))
+        ug=wl[len(wl)//2] if wl else (gl[len(gl)//4] if gl else None)
+        gap_ref=dict(ref=ug,from_wrapped=bool(wl))
+        def isdiv(x):
+            m_=marks2.get(x,{})
+            return bool(m_.get('div')) or (ug is not None and m_.get('gap') is not None and m_['gap']>gf*max(ug,.5*k))
+        # the head of the body and the end of the table close the first and the last region; a table with no inner
+        # division has no regions for this check
+        dv=[i for i,x in enumerate(ks) if isdiv(x)]
+        if dv and 'RGX' not in forms: dv=[-1]+dv+[len(ks)]   # (builder's reading; RGX: without it, a recorded form)
+        for a_,b_ in zip(dv,dv[1:]):
+            rg=ks[a_+1:b_]
+            if not rg: continue
+            if 'RGVM' in forms:
+                for x in rg:
+                    m_=marks2.get(x,{})
+                    if m_.get('TW2') and decisions[x][0]=='new' and not m_.get('values'): decisions[x]=('cont',['TW17 value mark'])
+                continue
+            text_region=False
+            for c_ in set(c for x in rg for c in marks2.get(x,{}).get('runon',[])):
+                if not anyc and c_!=1: continue
+                run=best=0
+                for x in rg:
+                    run=run+1 if c_ in marks2.get(x,{}).get('runon',[]) else 0; best=max(best,run)
+                if best>=kk-1: text_region=True
+            if text_region:
+                for x in rg: decisions[x]=('cont',['TW17 text region'])
+                lift0.difference_update(x+1 for x in rg)
+            elif 'B7' in forms:   # (B7) inside a region a capital opens a row only beside values of its own on its line
+                for x in rg:
+                    m_=marks2.get(x,{})
+                    if m_.get('TW2') and decisions[x][0]=='new' and not m_.get('values'):
+                        # (2a recorded form B7E, off) a capital leftmost line with nothing beside it opens its own row
+                        if 'B7E' in R8_CLUE_FLAGS and 'PROC' in forms and m_.get('alone0'): continue
+                        decisions[x]=('cont',['B7 value mark'])
+    if any(f_.startswith('PROC') for f_ in forms) and body:
+        # (build order of 2026-11-17, point 4) two page conditions that keep a part under the clues a flagged list, from
+        # the page's geometry alone: (i) a row border set where, in a column other than the leftmost, the lower line's
+        # text starts more than an em to the right of the upper line's text (a hanging indent: the lower line goes on
+        # the cell above); (ii) a body line much lower than the others (a raised mark alone on its line, not a row)
+        hts=sorted(lines[li]['bot']-lines[li]['top'] for li in body); em=hts[len(hts)//2] if hts else k*10
+        for li,(d_,m_) in list(decisions.items()):
+            if d_!='new' or li+1 not in byline: continue
+            for c_ in range(1,nc):
+                up_=[g for g in byline[li] if g['col']==c_]; lo_=[g for g in byline[li+1] if g['col']==c_]
+                if not up_ or not lo_: continue
+                gu=min(up_,key=lambda g:g['box'][0]); gl=min(lo_,key=lambda g:g['box'][0])
+                if ov.complete_value(text(gu)) or ov.complete_value(text(gl)): continue
+                if gl['box'][0]-gu['box'][0]>em:
+                    decisions[li]=(None,m_+['an indented line under a row border (column %d)'%c_]); break
+        for li in body:
+            if lines[li]['bot']-lines[li]['top']<.6*em:
+                for q_ in (li-1,li):
+                    if q_ in decisions: decisions[q_]=(None,decisions[q_][1]+['a low line alone (a raised mark)'])
+    decided=bool(body) and all(d for d,_ in decisions.values())
+    # s (TG3, lane r8-overlay2): every group lies in a cell of its own: no two groups of one line share a cell (a header
+    # label and its neighbour in one column say a column line is missing, AQ07 p10)
+    occ=collections.Counter((g['line'],c_) for g in groups for c_ in range(g['col'],g['col_end']+1))
+    s_ok=not any(v>1 for v in occ.values())
+    # h (TG10, pass 2): a header label in one column stands over the body ink of that column (a label centred over two
+    # columns' ink with no span to give it is not settled, AQ10 p5 '1990')
+    h_ok=all(not body_ink[g['col']] or any(min(bx[2],g['box'][2])>max(bx[0],g['box'][0]) for bx in body_ink[g['col']])
+             for g in groups if g['line'] in head and g['col']==g['col_end'])
+    spans=[]
+    head_cov=collections.defaultdict(set)
+    def put(cells,g,headerline):
+        if headerline:
+            us=ul_span(g)
+            c0,c1=us if us and us[0]<=g['col'] and us[1]>=g['col_end'] else (g['col'],g['col_end'])
+            if us is not None: spans.append(dict(line=g['line'],overlay=[g['col'],g['col_end']],underline=list(us),text=text(g)))
+            span=range(c0,c1+1); head_cov[g['line']].update(span)
+        elif g['line'] in label_lines: span=[0]   # a label row prints in its first cell, as group rows do
+        else: span=[g['col']]
+        for c_ in span: cells[c_].append(text(g))
+    rows=[]
+    hs=sorted(head)
+    for li in hs:   # header tiers
+        q=pos.get(li-1)
+        if not rows or not rows[-1]['header'] or (li-1 in head and q is not None and q<len(fit['drawn']) and fit['drawn'][q]):
+            rows.append(dict(cells=[[] for _ in range(nc)],header=True,lines=[]))
+        for g in sorted(byline[li],key=lambda g:g['box'][0]): put(rows[-1]['cells'],g,True)
+        rows[-1]['lines'].append(li)
+    entry_ix=None
+    for li in body:
+        if not rows or rows[-1]['header'] or decisions.get(li-1,('new',))[0]!='cont':
+            rows.append(dict(cells=[[] for _ in range(nc)],header=False,lines=[],group=li in label_lines))
+            if li not in lift0: entry_ix=len(rows)-1
+        lifted=li in lift0 and len(rows)>=2 and not rows[-2]['header']
+        tgt_=(rows[entry_ix] if ('D9' in forms and entry_ix is not None and entry_ix<len(rows)-1) else rows[-2]) if lifted else None   # (D9) the entry's cell
+        # (2c, F9, TW1, a switch TW1E, off) a leftmost bracket line that goes on in a row whose leftmost cell is empty (a
+        # sub-row) is a wrap of the leftmost text above: it joins the entry's leftmost cell, not the sub-row's empty one
+        if (not lifted and 'TW1E' in R8_CLUE_FLAGS and 'PROC' in forms and marks2.get(li-1,{}).get('TW1')
+                and decisions.get(li-1,(None,))[0]=='cont' and not rows[-1]['cells'][0]):
+            e_=next((r_ for r_ in reversed(rows[:-1]) if r_['cells'][0] or r_['header']),None)
+            if e_ is not None and not e_['header']: lifted=True; tgt_=e_
+        for g in sorted(byline[li],key=lambda g:g['box'][0]):
+            if lifted and g['col']==0: tgt_['cells'][0].append(text(g))
+            else: put(rows[-1]['cells'],g,False)
+        rows[-1]['lines'].append(li)
+    # (memo 1) the header's spans are settled on every line: on each header line but the last, no column between its
+    # first and last covered column is left uncovered where the last header line has a cell (a label over two columns
+    # set in one, with the next cell empty, is not settled)
+    header_settled=True
+    if len(hs)>=2:
+        last_cov=head_cov.get(hs[-1],set())
+        for li in hs[:-1]:
+            if li==lone_top: continue   # (T2) the lone top header row covers the whole table
+            cv=head_cov.get(li,set())
+            mid=[x for x in hs if li<x<hs[-1]]
+            # (a column whose own label is set on several header lines, wrapped and bottom-aligned, is settled: it has a
+            #  cell on a header line between this one and the last; AV19 p3)
+            if cv and any(c_ not in cv and c_ in last_cov and not any(c_ in head_cov.get(x,set()) for x in mid)
+                          for c_ in range(min(cv),max(cv)+1)): header_settled=False
+    def lbox(li): return hull(e['box_px'] for b,t,e in lines[li]['items'])
+    cellrows=[dict(box=[round(v,1) for v in hull([lbox(li),lbox(li+1)])],decision=d,marks=m,marks2=marks2.get(li,{}),
+                   lines=[' | '.join(text(g) for g in sorted(byline[x],key=lambda g:g['box'][0]))[:60] for x in (li,li+1)])
+              for li,(d,m) in sorted(decisions.items())]
+    # TG13 extra divisions (counted, nothing printed): body cells over several columns, and first-column labels over
+    # several rows (a first-column group with two or more following body lines that hold no first-column group but
+    # cells in two or more other columns)
+    body_merged=sum(1 for g in groups if g['line'] in body and g['col']!=g['col_end'])
+    has0={li for li in body if any(g['col']==0 for g in groups if g['line']==li)}
+    row_labels=0
+    for i_,li in enumerate(body):
+        if li not in has0: continue
+        n_=0
+        for lj in body[i_+1:]:
+            if lj in has0: break
+            if len({g['col'] for g in groups if g['line']==lj})>=2: n_+=1
+        row_labels+=n_>=2
+    return dict(trim_ids=sorted({e.get('id') for li in trim_top for b_,t_,e in lines[li]['items'] if isinstance(e,dict) and e.get('id') is not None},key=str),tw17ref=locals().get('gap_ref'),settings=sorted(readings),texts0=len(texts0),foot_ok=foot_ok,header_settled=header_settled,notes=[' '.join(t for b,t,e in sorted(lines[li]['items'],key=lambda it:it[0][0])) for li in foot_notes],
+                trim_top=[' '.join(t for b,t,e in sorted(lines[li]['items'],key=lambda it:it[0][0])) for li in trim_top],
+                trim_bottom=[' '.join(t for b,t,e in sorted(lines[li]['items'],key=lambda it:it[0][0])) for li in trim_bottom],
+                spanned=len(spanned),s=s_ok,h=h_ok,forms=sorted(forms),label_lines=sorted(label_lines),merged_cells=len(merged_ok),decided=decided,cellrows=cellrows,body_merged=body_merged,row_labels=row_labels,header_spans=spans,bands=fit.get('bands',[]),a=a,b=b,b2=b2,c=c,d=d,r=r_ok,g=g_ok,n=n_ok,u=bool(fit.get('rendered')),rows=rows,header=sorted(head),halves=halves,lines_pt=[round(x/k,1) for x in fit['col_lines']])
+
+
+def overlay_columns_differ(fit, lines, col, header=()):
+    """Step 3 (r8-overlay): the overlay's columns differ from the program's when some group of words of the body lies
+    in other columns: the groups that lie in one column on both readings do not pair the columns one to one, or a
+    group spans columns on one reading and not on the other. Header lines (header: their indexes) are not compared:
+    their cells are the column rules' (r7-columns), which the overlay's columns do not settle."""
+    flat=[it for L in lines for it in L['items']]
+    ab=collections.defaultdict(set); ba=collections.defaultdict(set)
+    for g in fit['groups']:
+        if g['line'] in header: continue
+        cs={col(flat[i][0]) for i in g['items']}
+        bc=(min(cs),max(cs)); oc=(g['col'],g['col_end'])
+        if (bc[0]==bc[1])!=(oc[0]==oc[1]): return True
+        if bc[0]==bc[1]: ab[bc[0]].add(oc[0]); ba[oc[0]].add(bc[0])
+    return any(len(v)>1 for v in ab.values()) or any(len(v)>1 for v in ba.values())
+
+
 def table_rows(runs, body, page=None):
     """Reconstruct cells from gutters, PDF character positions and drawn row structure, in the table's frame.
     Repeated fill edges and segmented rules support column boundaries. Distinct header cells retain
@@ -2854,8 +4146,10 @@ def table_rows(runs, body, page=None):
     Flowing notes start at the table margin or follow a bottom border, large gap or font change;
     a wide final column is still a cell.
     None between output rows denotes a new panel, not an empty data row."""
+    runs0, body0 = runs, body
     runs = [e for e in runs if e['text'].strip()]
     if not runs: return [], []
+    r7_changed=[]; r7_placed=[]   # (r7-columns) what the column rules changed in this table
     ang = collections.Counter(round(e['angle'])%360 for e in runs).most_common(1)[0][0]; f=frame(ang)
     # Large watermark glyphs can make rule 1 join ordinary characters from different baselines.
     # Only verified source characters may undo that join. Their median size distinguishes the
@@ -3008,6 +4302,9 @@ def table_rows(runs, body, page=None):
         span=max(b[2] for b,t,e in L['items'])-min(b[0] for b,t,e in L['items'])
         prose=sum(c.isalpha() for c in txt)>.55*len(txt) and len(txt)>10
         last_rule=any(lines[max(0,i-1)]['bot']-.2*h <= y < L['top'] for y in closing_rules) and not cells_follow(i)
+        # (1d, a switch NOTES_LOWEST, off) the table's notes lie under its lowest rule (TE3): a full-width rule with another
+        # closing rule below this line is a row border inside the table, and the lines under it stay rows (AT10 p6)
+        if last_rule and 'NOTES_LOWEST' in R8_CLUE_FLAGS and any(y>L['top'] for y in closing_rules): last_rule=False
         flowing=len({id(e) for b,t,e in L['items']})<=3 and all(b[0]-a[2]<2*h for (a,_,_),(b,_,_) in zip(L['items'],L['items'][1:]))
         marked_tail=(last_rule and note_start.match(txt) and len(txt.split())>=6
                      and L['items'][0][0][0]<u0+.5*h and all(
@@ -3169,6 +4466,23 @@ def table_rows(runs, body, page=None):
         return max(0,min(nc-1,next((i for i,x in enumerate(cuts) if (b[0]+b[2])/2 < x),nc-1)))
     # Remove weak gutters that merely cut a text column into words. Independent starts on both sides must recur.
     paired_cuts=[]   # gutters kept by paired_header_columns alone (paired_texts: their header pairs)
+    # The word space of the column rules (r7-columns, memo 1): white between neighbouring words narrower than half the
+    # type size (the characters' size, not the line box, which tall font boxes inflate); when no two words of the
+    # table stand that close (no cell holds two words), a quarter of the type size. White between two cells never
+    # counts as a word space.
+    em_=typical if isinstance(typical,(int,float)) and typical>0 else h   # (a caller may pass no body size)
+    ws_gaps=sorted(g for L in lines for (a,_,_),(b,_,_) in zip(L['items'],L['items'][1:]) for g in [b[0]-a[2]] if 0<g<.5*em_)
+    tc_space=ws_gaps[len(ws_gaps)//2] if ws_gaps else .25*em_
+    # Rules TC1 and TC3 (r7-columns): a white strip at least one word space wide that no line crosses, with a
+    # shading edge in it, is a column boundary on two witnesses, however few lines hold cells on both sides of it
+    # (a one-row continuation under a shaded header, AU03 Table 2).
+    # (rule TC2: a line printed across the table as one cell, a title or a label, does not break the strip)
+    celled=[L for L in lines if len(table_header_cells(L['items'],tc_space))>=2]
+    def fill_strip(x):
+        if _R7_OFF[0]: return False
+        if any(b[0]+1<x<b[2]-1 for L in celled for b,t,e in L['items']) or not any(abs(x-d)<.5*h for d in fill_cuts): return False
+        lefts=[b[2] for L in celled for b,t,e in L['items'] if b[2]<=x]; rights=[b[0] for L in celled for b,t,e in L['items'] if b[0]>=x]
+        return bool(lefts and rights) and min(rights)-max(lefts)>=tc_space
     if nc>1:
         keep=[];label_support={}
         for j,x in enumerate(cuts):
@@ -3184,6 +4498,7 @@ def table_rows(runs, body, page=None):
                             for L in column_lines if any(col(b)==j for b,t,e in L['items']) and any(col(b)==j+1 for b,t,e in L['items'])),default=0)
             sparse_grid=len(lines)<=6 and pairs>=1 and sparse_gap>1.4*h
             if pairs>=2 and independent>=2 or label_values>=3 or sparse_grid or any(abs(x-d)<h for d in drawn) or j==0 and value_stack(lines,x,h,cuts[1] if len(cuts)>1 else None): keep.append(x)
+            elif fill_strip(x): keep.append(x); r7_changed.append('TC1+TC3')
         # The header-cell proof of own_header_columns holds here too: over alternating values only
         # the header lines pair, so a single header line cannot meet the recurrence above. Its
         # neighbouring gutters are those the recurrence kept; a rejected candidate beside it is
@@ -3409,6 +4724,47 @@ def table_rows(runs, body, page=None):
                 if gaps:
                     a,b=max(gaps,key=lambda ab:ab[1]-ab[0]);cuts.append((a+b)/2);cuts.sort()
                     nc=len(cuts)+1;bounds=[u0-1]+cuts+[u1+1]
+    # Rules TG1-TG7 (r8-overlay): the spreadsheet grid laid over the table's lines. Where the overlay fits clean
+    # (every group in one cell or a merged cell, every column keeping one setting on every line) and its columns
+    # differ from the ones read above, the grid takes the overlay's columns (step 3); the rows below are read as
+    # before (step 4). The drawn or shaded row borders it finds are kept for the row reading.
+    r8=dict(changed=[],doubts=[],border_after={},fit=None,base_cuts=list(cuts))
+    if not _R8_OFF[0] and nc>=1:
+        k8=(page or {}).get('params',{}).get('dpi',150)/72
+        fit8=table_overlay(lines,graphics,page,ang,k8)
+        r8['fit']=fit8
+        if fit8:
+            for q,why in enumerate(fit8['drawn_why']):
+                if why: r8['border_after'][fit8['line_of_row'][q]]=(why,fit8['drawn_cover'][q])
+            head8={i for i,L in enumerate(lines) if header_end is not None and L['vc']<header_end}
+            r8['grid']=overlay_grid(fit8,lines,head8,graphics,k8)
+            # (lane r8-overlay2) the grid under each loosening form and under all of them, for the measure and the gate
+            r8['grid_forms']={nm:overlay_grid(fit8,lines,head8,graphics,k8,frozenset(fs))
+                              for nm,fs in (('label',('label',)),('merge',('merge',)),('a2',('a2',)),('all',('label','merge','a2')),
+                                            ('built',('label','a2','hspan','shade2','cent')),('hspan',('label','a2','hspan')),('trim',('label','a2','trim')),
+                                            ('rowlabel',('label','a2','rowlabel')),('all2',('label','a2','hspan','trim','rowlabel')),
+                                            ('band',('label','a2','hspan','band')),('shade2',('label','a2','hspan','shade2')),
+                                            ('gap',('label','a2','hspan','gap')),('cent',('label','a2','hspan','cent')),
+                                            ('TW1',('label','a2','hspan','shade2','cent','TW1')),('TW2',('label','a2','hspan','shade2','cent','TW2')),
+                                            ('TW345',('label','a2','hspan','shade2','cent','TW345')),('TW6',('label','a2','hspan','shade2','cent','TW6')),
+                                            ('TWall',('label','a2','hspan','shade2','cent','TW1','TW2','TW345','TW6')),
+                                            ('PROC',('label','a2','hspan','shade2','cent','PROC')),('PROCx',('label','a2','hspan','shade2','cent','PROC','PROCx')),
+                                            ('PROCi',('label','a2','hspan','shade2','cent','PROC','PROCi')),('PROCii',('label','a2','hspan','shade2','cent','PROC','PROCii')),
+                                            ('PROCu',('label','a2','hspan','shade2','cent','PROCu')),
+                                            ('clues',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','B8','B7','D9','D8','D7','T1')),('sT2',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','B8','B7','D9','D8','D7','T2')),('sT12',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','B8','B7','D9','D8','D7','T1','T2')),('sT1',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','B8','B7','D9','D8','D7','T1')),('sT1L',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','B8','B7','D9','D8','D7','T1','T1L')),('sD5',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','B8','B7','D9','D8','D7','D5')),('sD6',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','B8','B7','D9','D8','D7','D6')),('tA1',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','T10A')),('tB5',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','T10A','T10B')),('tA3',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','T10A','T10B','T10C')),('tA2',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','T10A','T10B','T10C','T10D')),('tA4',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','T10A','T10B','T10C','T10D','T10E')),('cluesAny',('label','a2','hspan','shade2','cent','PROC','RG','RGA','RGK2','RGG200')),('cluesX',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200','RGX')),('cluesO',('label','a2','hspan','shade2','cent','PROC','PROCo')),('cluesNoRG',('label','a2','hspan','shade2','cent','PROC',)),('rg2ng125',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG125')),('rg2ng150',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG150')),('rg2ng200',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK2','RGG200')),('rg2ag125',('label','a2','hspan','shade2','cent','PROC','RG','RGA','RGK2','RGG125')),('rg2ag150',('label','a2','hspan','shade2','cent','PROC','RG','RGA','RGK2','RGG150')),('rg3ng125',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK3','RGG125')),('rg3ng150',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK3','RGG150')),('rg3ng200',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK3','RGG200')),('rg3ag125',('label','a2','hspan','shade2','cent','PROC','RG','RGA','RGK3','RGG125')),('rg3ag150',('label','a2','hspan','shade2','cent','PROC','RG','RGA','RGK3','RGG150')),('rg3ag200',('label','a2','hspan','shade2','cent','PROC','RG','RGA','RGK3','RGG200')),('rg4ng125',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK4','RGG125')),('rg4ng150',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK4','RGG150')),('rg4ng200',('label','a2','hspan','shade2','cent','PROC','RG','RGN','RGK4','RGG200')),('rg4ag125',('label','a2','hspan','shade2','cent','PROC','RG','RGA','RGK4','RGG125')),('rg4ag150',('label','a2','hspan','shade2','cent','PROC','RG','RGA','RGK4','RGG150')),('rg4ag200',('label','a2','hspan','shade2','cent','PROC','RG','RGA','RGK4','RGG200')),('vm',('label','a2','hspan','shade2','cent','PROC','RG','RGVM','RGG200')))}
+            # (a group over two of the overlay's columns, a header over an estimate and its interval, says the program's
+            # one column there may be right: the marks disagree, the columns stay)
+            if fit8['clean'] and not fit8['counts']['merged'] and overlay_columns_differ(fit8,lines,col,head8):
+                cuts=sorted(fit8['col_lines']); nc=len(cuts)+1; bounds=[u0-1]+cuts+[u1+1]
+                r8['changed'].append('TG6-columns')
+    line_index={id(it):li for li,L in enumerate(lines) for it in L['items']}
+    def r8_border(L, header=False):
+        """the overlay's drawn or shaded border between line L and the line above it; between two header lines only
+        a change of shading or a line across the whole table (a spanning header's underline parts no header row)"""
+        li=next((line_index[id(it)] for it in L['items'] if id(it) in line_index),None)
+        b=r8['border_after'].get(li-1) if li else None
+        if b and header and 'shade' not in b[0] and b[1]<.9: return None
+        return b
     # The repeated left edges belong to columns, independently of baselines.
     # A saved run may bridge two cells with an ordinary word space. A word at
     # the next column's established start splits that run; an overhanging final
@@ -3939,6 +5295,152 @@ def table_rows(runs, body, page=None):
                    and bx[2]-bx[0]<ext(blk)[2]-ext(blk)[0] and bx[0]>bounds[a]-.5*h for (bx,_),blk in zip(boxes,blocks)):
                 return {key:blk for (bx,key),blk in zip(boxes,blocks)}
         return {}
+    # Rules TC4 and TC5 (round 7, columns): the body ink of each column (the words of body lines printed in two
+    # or more columns; a label printed across the table in one cell says nothing of the columns) and the header
+    # cells of every header line. A header cell cut at its word gaps by the word-by-word placement below is
+    # placed whole afterwards (header_cell_place); columns emptied that way are no columns (TC6).
+    # Header lines: the header band's lines, and the lines at the top of the table that hold no word in the stub
+    # column (a header the band did not take; their placement is the body lines' one).
+    top_lines=[]
+    for K in lines:
+        if header_end is not None and K['vc']<header_end: continue
+        if any(col(b)==0 for b,t,e in K['items']): break
+        top_lines.append(K)
+    # ... and, as the layout grid reads a header, the lines above the first line with two printed values right of
+    # the stub column, when that line is among the first five under the band
+    rest=[K for K in lines if header_end is None or K['vc']>=header_end]
+    def two_values(K):
+        return sum(layout_value(' '.join(t for b,t,e in cell_)) for cell_ in table_header_cells([it for it in K['items'] if col(it[0])>0],tc_space))>=2
+    first_valued=next((i for i,K in enumerate(rest[:5]) if two_values(K)),None)
+    if first_valued: top_lines+= [K for K in rest[:first_valued] if not any(K is T for T in top_lines)]
+    body_ink={}
+    for K in lines:
+        if header_end is not None and K['vc']<header_end or any(K is T for T in top_lines) or len({col(b) for b,t,e in K['items']})<2: continue
+        for b,t,e in K['items']:
+            span_=body_ink.setdefault(col(b),[b[0],b[2]]); span_[0]=min(span_[0],b[0]); span_[1]=max(span_[1],b[2])
+    header_cell_lines=[(K,table_header_cells(K['items'],tc_space)) for K in lines
+                       if header_end is not None and K['vc']<header_end or any(K is T for T in top_lines)]
+    pieced=set(); r7_doubts=[]; tc5_texts=set()
+    def column_edge_runs(P):
+        """The words of P split into two or more runs, in order, each run set to one edge of a different column's
+        body cells (the right edges of the run and of that column's ink meet, or the left edges, or the centres; one
+        edge for all runs), within a sixth of the type size, the runs going to neighbouring columns one after the
+        other (no column skipped): the runs as (start, end) word indexes, else None."""
+        tol=em_/6; cols_=sorted(body_ink)
+        edge_of=(lambda a,b: b, lambda a,b: a, lambda a,b: (a+b)/2)
+        for k in range(3):
+            def walk(i,last):
+                if i==len(P): return []
+                for j in range(i+1,len(P)+1):
+                    run_=P[i:j]; e_=edge_of[k](run_[0][0][0],max(b[2] for b,t,e in run_))
+                    for c in cols_:
+                        if (last<0 and c>last or last>=0 and cols_.index(c)==cols_.index(last)+1) and abs(e_-edge_of[k](*body_ink[c]))<=tol:
+                            rest=walk(j,c)
+                            if rest is not None: return [(i,j)]+rest
+                return None
+            runs_=walk(0,-1)
+            if runs_ and len(runs_)>=2: return runs_
+        return None
+    def header_cell_place(L, cells):
+        """TC4: a header cell goes whole to the body column whose ink it overlaps. TC5: a header cell whose reach
+        holds two or more columns that each have a cell on the lower header tier, or that lies over the ink of
+        two or more columns, is a spanning header, repeated over its columns and never cut. Only cells the
+        placement cut at a word gap are placed again; where the marks do not settle the place, the cut stays
+        and the place goes on the doubt list (TC7)."""
+        line_cells=next((cs for K,cs in header_cell_lines if K is L),[])
+        for i_,P in enumerate(line_cells):
+            if len(P)<2: continue
+            x0=min(b[0] for b,t,e in P); x1=max(b[2] for b,t,e in P)
+            words=collections.Counter(w for b,t,e in P for w in t.split())
+            hits=[(c,k) for c,ts in cells.items() for k,(x,t) in enumerate(ts) if x0-.5<=x<=x1+.5 and not collections.Counter(t.split())-words]
+            got=collections.Counter(w for c,k in hits for w in cells[c][k][1].split())
+            # Placed whole (or repeated) already, unless whole in a column with no body ink under it, a column the
+            # placement opened for the header alone (TC6).
+            spacer=got==words and len({c for c,k in hits})==1 and bool(body_ink) and hits[0][0] not in body_ink
+            if got!=words or len({c for c,k in hits})<2 and not spacer: continue
+            box=hull(e['box_px'] for b,t,e in P)
+            # Rule TC4 by the columns (memo 2): words of a header line that fall into runs each set to the same edge
+            # (left, right or centre) of the body cells of a different column are separate header cells, whatever
+            # the white between them. The cut stays; a cut that splits the words otherwise is listed (TC7).
+            split_=column_edge_runs(P)
+            if split_:
+                owner_=[max((sc for sc in sorted((cells[c][k][0],c) for c,k in hits) if sc[0]<=b[0]+.5))[1] for b,t,e in P]
+                if [len(set(owner_[a:b_])) for a,b_ in split_]!=[1]*len(split_) or len(set(owner_))!=len(split_):
+                    r7_doubts.append(('TC7',box,'header_cells_by_column_edges'))
+                continue
+            # The cut stays where the columns witness it against the run of words (the marks disagree, TC7):
+            # a drawn edge (a shading edge, rule TC3, or a vertical rule) stands in every gap between the pieces,
+            # or the words fall into runs each centred on its own column's body ink (cells set close, each over its
+            # column: every word goes to the column whose ink is nearest its centre).
+            starts_=sorted((cells[c][k][0],c) for c,k in hits)
+            owner=[max((sc for sc in starts_ if sc[0]<=b[0]+.5),default=starts_[0])[1] for b,t,e in P]
+            cut_gaps=[(P[j][0][2],P[j+1][0][0]) for j in range(len(P)-1) if owner[j]!=owner[j+1]]
+            top_,bot_=min(b[1] for b,t,e in P),max(b[3] for b,t,e in P)
+            def drawn_edge(g):
+                return any(min(gb[3],bot_)-max(gb[1],top_)>0 and (k=='fill' and any(g[0]-1<=x<=g[1]+1 for x in (gb[0],gb[2]))
+                           or k=='rule' and gb[2]-gb[0]<.3*h and g[0]-1<=gb[0] and gb[2]<=g[1]+1) for gb,k in graphics)
+            pieces=collections.defaultdict(list)
+            for o,(b,t,e) in zip(owner,P): pieces[o].append(b)
+            centred_=lambda c: c in body_ink and abs((hull(pieces[c])[0]+hull(pieces[c])[2])/2-(body_ink[c][0]+body_ink[c][1])/2)<.5*h
+            near=lambda b: min(body_ink,key=lambda c:max(body_ink[c][0]-b[2],b[0]-body_ink[c][1],0)+abs((b[0]+b[2])/2-(body_ink[c][0]+body_ink[c][1])/2)*1e-3) if body_ink else None
+            runs_=collections.defaultdict(list)
+            for b,t,e in P: runs_[near(b)].append(b)
+            order_=[near(b) for b,t,e in P]
+            own_runs=(len(runs_)>=2 and all(order_[j]<=order_[j+1] for j in range(len(order_)-1))
+                      and all(abs((hull(bs)[0]+hull(bs)[2])/2-(body_ink[c][0]+body_ink[c][1])/2)<.5*h for c,bs in runs_.items()))
+            if cut_gaps and all(drawn_edge(g) for g in cut_gaps) or all(centred_(c) for c in pieces) or own_runs:
+                r7_doubts.append(('TC7',box,'header_cell_pieces_over_own_columns')); continue
+            ink=[c for c in sorted(body_ink) if min(x1,body_ink[c][1])-max(x0,body_ink[c][0])>0]
+            # Its reach over a lower header tier: from half way to the header cell before it on its line to half
+            # way to the one after it (or the table's edges). The body columns centred in that reach that each
+            # have a header cell on a lower header line are the columns it heads.
+            lo=(max(b[2] for b,t,e in line_cells[i_-1])+x0)/2 if i_ else u0-1
+            hi=(x1+min(b[0] for b,t,e in line_cells[i_+1]))/2 if i_+1<len(line_cells) else u1+1
+            reach=[c for c in sorted(body_ink) if lo<=(body_ink[c][0]+body_ink[c][1])/2<=hi]
+            # (the stub column is in a label's reach only when the label stands over the stub's own ink)
+            if reach and reach[0]==min(body_ink) and not x0<body_ink[reach[0]][1]: reach=reach[1:]
+            # the lower tier: the lines right under this one that hold nothing in the stub column
+            below=[]
+            for K in lines[lines.index(L)+1:]:
+                if any(col(b)==0 for b,t,e in K['items']): break
+                below.append(K)
+            subs=lambda c: any(col(b)==c for K in below for b,t,e in K['items'])
+            if (len(reach)>=2 and all(subs(c) for c in reach)
+                    and set(ink)<=set(reach)): ds=reach
+            elif len(ink)>=2: ds=ink
+            elif len(ink)==1 and not spacer: ds=ink
+            else:
+                r7_doubts.append(('TC7',box,'header_cell_over_no_column' if not spacer else 'header_column_without_body')); continue
+            # A header of several tiers (memo 1): under a header line that holds two or more cells, a label is placed
+            # only over its span: its reach, every column of which has a lower label, with the label centred over
+            # those lower labels or over those columns' body ink (within half a line height). A span read from the
+            # ink alone, or one the label is not centred over, is not settled.
+            lower=[K for K,cs in header_cell_lines if K['vc']>L['vc'] and len(cs)>=2]+[K for K in below if len(table_header_cells(K['items'],tc_space))>=2]
+            if lower:
+                labels_=[b for K in lower for b,t,e in K['items'] if col(b) in ds]
+                mid_=(x0+x1)/2
+                centred_lab=bool(labels_) and abs(mid_-(min(b[0] for b in labels_)+max(b[2] for b in labels_))/2)<.5*h
+                centred_ink=abs(mid_-(min(body_ink[c][0] for c in ds)+max(body_ink[c][1] for c in ds))/2)<.5*h
+                if ds!=reach or len(ds)<2 or not (centred_lab or centred_ink):
+                    r7_doubts.append(('TC7',box,'tier_label_span_not_settled')); continue
+            # A line across every column, or the one cell of its line reaching from the stub column over others, is
+            # a title or a label across the table, not a column header.
+            if len(ds)>=2 and (set(ds)>=set(body_ink) or len(line_cells)==1 and min(ds)==min(body_ink)):
+                r7_doubts.append(('TC7',box,'header_cell_across_the_table')); continue
+            others={c for c,ts in cells.items() for k,(x,t) in enumerate(ts) if (c,k) not in hits}
+            if others & set(ds):
+                r7_doubts.append(('TC7',box,'header_cell_shares_a_column')); continue
+            text=' '.join(t for b,t,e in P)
+            for c,k in sorted(hits,reverse=True): cells[c].pop(k); pieced.add(c)
+            for c in list(cells):
+                if not cells[c]: del cells[c]
+            # (the header tiers stay as the placement made them: rows are not this rule's business)
+            for c in ds: cells.setdefault(c,[]).append((x0,text)); direct.add(c)
+            r7_changed.append('TC5' if len(ds)>1 else 'TC4')
+            inner_=[P[j+1][0][0]-P[j][0][2] for j in range(len(P)-1)]
+            r7_placed.append(dict(rule='TC5' if len(ds)>1 else 'TC4',box=[round(v,1) for v in box],words=len(P),columns=len(ds),
+                                  widest_white_in_word_spaces=round(max(inner_)/tc_space,2) if inner_ else 0))
+            if len(ds)>1: tc5_texts.add(text)
     for L in lines:
         next_line=lines[lines.index(L)+1] if L is not lines[-1] else None
         group_header=False; sub_row=False
@@ -4070,6 +5572,7 @@ def table_rows(runs, body, page=None):
                     if col(b)>segment_col and aligned_start(b,' '.join(tt for bb,tt,ee in group[:gi])): segment_col=col(b)
                     c=(segment_col if edge_split and not is_header else (col(rb) if preserve else (col(rb) if single_label and not text_gap and rb[0]>bounds[1] else (0 if single_label and not text_gap else col(b)))))
                     cells[c].append((b[0],t)); direct.add(c)
+        if not _R7_OFF[0] and (is_header or any(L is T for T in top_lines)) and id(L) not in dividers and not heading_row: header_cell_place(L,cells)
         cells={c:[' '.join(t for x,t in sorted(ts))] for c,ts in cells.items()}
         if rows:
             prev=rows[-1]; gap=L['top']-prev['bot']
@@ -4126,7 +5629,7 @@ def table_rows(runs, body, page=None):
             # from the line above, hangs its wrapped line there (r3-wraplabels)
             k_=lines.index(L)
             if (indented and c0 and k_>0 and hangs_alone(next_line)
-                    and line_step(L['items'],next_line['items'])<=.85*line_step(lines[k_-1]['items'],L['items']) and max(b[2] for b,t,e in in_column(L['items'],0) or [(0,0,0,0)])>col_right.get(0,starts[1])+.3*h
+                    and line_step(L['items'],next_line['items'])<=.85*line_step(lines[k_-1]['items'],L['items']) and max(b[2] for b,t,e in in_column(L['items'],0) or [(0,0,0,0)])>col_right.get(0,starts[1] if len(starts)>1 else float('inf'))+.3*h
                     and label_goes_on(in_column(L['items'],0),in_column(next_line['items'],0))): indented=False
             # Drawn study bands (paint) and citation entry bands are row witnesses of their own.
             banded=bool(cell_band) or uniform_bands and bool(tall_bands)
@@ -4361,7 +5864,7 @@ def table_rows(runs, body, page=None):
                     # and it stays inside the label column's measure (the right edge of the labels
                     # beside values): a wrapped label's next line never runs past it
                     if (above0 and here0 and .6*h<line_step(above0,here0)<=1.15*pitch
-                            and max(b[2] for b,t,e in here0)<=col_right.get(0,starts[1])+.3*h
+                            and max(b[2] for b,t,e in here0)<=col_right.get(0,starts[1] if len(starts)>1 else float('inf'))+.3*h
                             and run_setting(here0)[:2]==run_setting(above0)[:2]
                             # a line set like a divider row of this table at its left edge is no wrap
                             and not any(run_setting(K['items'])==run_setting(here0) and abs(left_(K['items'])-left_(here0))<.3*h
@@ -4432,13 +5935,22 @@ def table_rows(runs, body, page=None):
             # label's wrapped words (a run centred under one of its labels) may go on in it; any other
             # line (a wrapped header cell starting below the labels) starts a row of its own (r2-cells).
             if line_labels or heading_row or prev.get('heading_row') or (prev.get('paired_label') and not under_label(prev,L)): carry=False
+            # Rule TG7 (r8-overlay): a drawn line or a change of shading between two lines parts their rows. Where
+            # the line above ends in an unfinished word (the marks disagree), the row reading stays and the place is
+            # listed as doubtful.
+            if carry and r8_border(L,header=is_header and prev['header']):
+                above8=lines[lines.index(L)-1]
+                if ROW_WORD_TAIL.search(' '.join(t for b,t,e in above8['items']).rstrip()):
+                    r8['doubts'].append(('TG7',[above8,L],'drawn_border_against_unfinished_cell'))
+                else:
+                    carry=False; r8['changed'].append('TG7-border')
             if carry:
                 prev['segments'].append(dict(cells))
                 prev['items'].extend(L['items'])
                 prev['spans'].update(spans)
                 for c,ts in cells.items(): prev['cells'].setdefault(c,[]).extend(ts)
                 prev['bot']=L['bot'];prev['last']=cells;continue
-        if rows and not is_header and not pair_line(L,rows[-1]) and not line_labels and not (rows[-1].get('paired_label') and not under_label(rows[-1],L)) and not heading_row and not rows[-1].get('heading_row'):
+        if rows and not is_header and not (not rows[-1]['header'] and r8_border(L)) and not pair_line(L,rows[-1]) and not line_labels and not (rows[-1].get('paired_label') and not under_label(rows[-1],L)) and not heading_row and not rows[-1].get('heading_row'):
             # A lower-case tail of a row label may cross the neighbouring cells' row boundary.
             lone_tail=len(cells)==1 and p0 and gap<.7*h and not rows[-1]['header'] and id(L) not in dividers
             if c0 and (filled_values>=2 or lone_tail) and row_witness=='cont' and not tail_cols:
@@ -4519,6 +6031,10 @@ def table_rows(runs, body, page=None):
             title['dropped']=True
     # An entirely unoccupied column is not a cell; consistent widths make valid Markdown tables.
     used=[c for c in range(nc) if c in direct]
+    # Rule TC6 (r7-columns): a column that held only pieces of a header cell placed whole elsewhere (TC4, TC5)
+    # holds no word of the page: it is no column.
+    # (a cell repeated from its left neighbour, a spanning cell or a title across the table, is not its own word)
+    used=[c for c in used if c not in pieced or any(r['cells'].get(c) and r['cells'].get(c)!=r['cells'].get(c-1) for r in rows)]
     out=[]
     for r in table_subrows(rows):
         cells=[r['cells'].get(c,[]) for c in used]
@@ -4547,7 +6063,58 @@ def table_rows(runs, body, page=None):
             return not (stub and rest) or min(b[1] for b in stub)<min(b[1] for b in rest)-.3*h
         if len(stubs)==1 and spans_tiers(stubs[0]) and all(out[0][c] for c in range(1,len(out[stubs[0]])) if out[stubs[0]][c]):
             out[0][0]=out[stubs[0]][0];out[stubs[0]][0]=[]
+    # Rules TC1, TC2 and TC7 (r7-columns): white strips at least one word space wide through every body line,
+    # where a line printed across the table as one cell (one header-cell run of words) does not break a strip.
+    # A grid whose column count is not the strip count plus one goes on the doubt list; the grid is not changed.
+    breaking=[K for K in lines if (header_end is None or K['vc']>header_end) and len(table_header_cells(K['items'],tc_space))>=2]
+    if breaking and len(used)>=2:
+        strips=0; edge=None
+        for a,b in sorted((b[0],b[2]) for K in breaking for b,t,e in K['items']):
+            if edge is not None and a-edge>=tc_space: strips+=1
+            edge=b if edge is None else max(edge,b)
+        if len(used)!=strips+1: r7_doubts.append(('TC7',hull(e['box_px'] for e in runs),'columns_not_strips_plus_one'))
+    # The gate's reading as BASE made it (memo 1): when the column rules changed this table, the table read without
+    # them goes with the rows, with the number of header lines that hold two or more cells (the header's tiers).
+    # Step 4 (r8-overlay, rule TG7): where no line or shading parts two body lines, the row reading above stays. The two
+    # readings of each body boundary are recorded (copy.tables.json); they are not listed as doubtful (send-back 1: the
+    # overlay's plain cell rows were right at 11 of 276 labelled places). The rows as read without the
+    # overlay go with the grid when the overlay changed it (the gate compares the two readings).
+    fit8=r8.get('fit')
+    if fit8 and not _R8_OFF[0]:
+        row_of={}
+        for ri,r in enumerate(rows):
+            for it in r['items']:
+                li=line_index.get(id(it))
+                if li is not None and li not in row_of: row_of[li]=ri
+        cell_new={fit8['line_of_row'][q]:fit8['cell_row'][q] for q in range(len(fit8['cell_row']))}
+        r8['pairs']=[]
+        for a in range(len(lines)-1):
+            b=a+1
+            if a not in row_of or b not in row_of or a not in cell_new: continue
+            if rows[row_of[a]]['header'] or rows[row_of[b]]['header']: continue
+            base_new=row_of[a]!=row_of[b]; ov_new=cell_new[a]; drawn=bool(r8['border_after'].get(a))
+            r8['pairs'].append((a,base_new,ov_new,drawn))
+    r8['base']=None
+    if fit8 and not _R8_OFF[0]:
+        _R8_OFF[0]=True
+        try: r8['base']=table_rows(runs0,body0,page)
+        finally: _R8_OFF[0]=False
+    for r in out: r.r8=r8
+    base_=None
+    if r7_changed and not _R7_OFF[0]:
+        _R7_OFF[0]=True
+        try: base_=table_rows(runs0,body0,page)
+        finally: _R7_OFF[0]=False
+    tiers_=sum(len(cs)>=2 for K,cs in header_cell_lines)
+    for r in out:
+        r.r7_base=base_; r.r7_tiers=tiers_; r.r7_changed=list(r7_changed); r.r7_placed=list(r7_placed)
+        r.r7_doubts=r7_doubts
+        # a row holding a header cell repeated over its span by TC5 (table_warnings reads it as r2-cells' group labels)
+        r.tc5_spanning=bool(tc5_texts) and any(x in ' '.join(c) for c in r for x in tc5_texts)
     restore_table_row_spans(out,table_source(runs,page or dict(elements=runs)))
+    if r8.get('base') is not None:
+        flat8=lambda A: [None if r is None else [[str(x) for x in c] for c in r] for r in A]
+        if flat8(r8['base'][0])==flat8(out) and list(r8['base'][1])==list(notes): r8['base']=None
     return out,notes
 
 
@@ -4560,6 +6127,7 @@ def table_warnings(rows, runs):
     grid=[r for r in rows if r];warnings=[]
     for row in grid[2:]:
         if getattr(row,'paired_label',False): continue   # a group label repeated over its columns (r2-cells)
+        if getattr(row,'tc5_spanning',False): continue   # a spanning header repeated over its columns (TC5, r7-columns)
         texts=[' '.join(c) for c in row if c]
         counts=collections.Counter(t for t in texts if len(t)>25 and len(re.findall(r'[A-Za-z]{2,}',t))>=4)
         if counts and max(counts.values())>=2:
@@ -6303,7 +7871,7 @@ def recover_unowned_table_parts(pages, per_page, body):
             if not ids-owned-caps and not orphan:continue
             # Figures have independent ownership even when their panels are
             # shaded and a table caption happens to be on the preceding page.
-            if any(f[1]=='figure' and x_overlap(fr(f[5]['box']),region)>.6
+            if any(f[1]=='figure' and f[5].get('box') and x_overlap(fr(f[5]['box']),region)>.6
                    and min(fr(f[5]['box'])[3],region[3])-max(fr(f[5]['box'])[1],region[1])>body for f in floats):continue
             touching=[f for f in tables if ids & payload(f)]
             if any(replacements and f in old for _,_,old in replacements for f in touching):continue
@@ -6339,6 +7907,13 @@ def recover_unowned_table_parts(pages, per_page, body):
             ms-=set(cm)
             # A new caption in the island belongs to a separate table.
             if any(LABEL.match(rs[m]['text']) or re.match(r'^(?:Table|Figure|Fig)\s+\d',label_fix(rs[m]['text']),re.I) for m in ms if m in rs):continue
+            # round 8 TF7/TF8 (lane r8-box): a continued part takes no island headed by a table label of its own (a label
+            # with no continuation word at the island's top, inside its width, wherever the label's run is owned)
+            # (lane r8-turned: a turned island is read in its upright frame, by the labels set at its turn)
+            if n!=p['page'] and any(
+                    (m:=r8_label_line(e['text'])) and not re.search(r'contin|cont[.’\']',m.group('rest'),re.I)
+                    and region[1]-4*body<=fr(e['box_px'])[1]<=region[1]+2*body and min(fr(e['box_px'])[2],region[2])>max(fr(e['box_px'])[0],region[0])
+                    for e in rs.values() if not round(angle)%360 or round(e.get('angle',0))%360==round(angle)%360):continue
             if not ms:continue
             caption=f[2] if n==p['page'] else re.match(r'^Table\s+S?'+TABLE_NUMBER,f[2],re.I)[0]+' (continued)'
             replacements.append((dict(angle=angle,members=sorted(ms),caption=caption,caption_ids=cm,
@@ -6381,6 +7956,144 @@ def recover_unowned_table_parts(pages, per_page, body):
         prepared['_copy_parts_prepared']=True
         pages[i]=prepared;changed.add(i)
     return changed
+
+
+# ---------------------------------------------------------------- one caption, one table (round 7, lane r7-pairing)
+TP_LABEL = re.compile(r'^(?:(?:Supplemental|Supplementary)\s+)?Table\s+S?'+TABLE_NUMBER+r'(?![\w])', re.I)
+_PAIRING_PENDING = []   # (rule, page, box, reason, label): doubtful places; main() adds them with the label's copy line
+
+
+def tp_line_ids(f):
+    """The run ids a table float's printed source lines hold."""
+    return {x['id'] for l in (f[5].get('table_source') or {}).get('lines', []) for x in l.get('items', [])}
+
+
+def pair_orphan_tables(pages, per_page, body, page_uncertain):
+    """Rules TP1 to TP3 (round 7): one caption, one table.
+
+    TP1: a table caption printed with no lines and a table printed with no caption are one table when the
+    caption stands above the table, the table's top lies inside the caption's float region, the two share at
+    least half the table's width, both read at one angle, and no other caption stands between them. The table
+    then prints under its caption. A label rule 4 left unpaired whose runs the uncaptioned table itself prints
+    names that table (its label heads it).
+    TP2: a caption whose part is a printed-line list takes the lines of every uncaptioned part so placed into one
+    list in page order. A caption whose part is a grid keeps its grid: the split is listed as doubtful.
+    TP3: a caption whose table has no text layer (outline art or an image) keeps its caption, takes no other
+    table's lines and is listed as doubtful. A caption left with no lines is listed as doubtful too.
+    Only the same page is read: on the 212 development papers no caption and table were split over two pages."""
+    del _PAIRING_PENDING[:]
+    for i, p in enumerate(pages):
+        if (p.get('scan_evidence') or {}).get('ocr_layer'): continue
+        blocks, floats, side = per_page[i]
+        if not any(f[1] == 'table' for f in floats): continue
+        floats = list(floats)
+        runs = {e['id']: e for e in p['elements'] if e['kind'] == 'text'}
+
+        def angle_of(f):
+            src = f[5].get('table_source') or {}
+            if src.get('lines'): return round(src.get('angle', 0)) % 360
+            cap = [runs[m] for m in f[5].get('caption_ids') or [] if m in runs]
+            return round(cap[0]['angle']) % 360 if cap else 0
+        tables = [f for f in floats if f[1] == 'table']
+        orphans = [f for f in tables if 'no caption' in f[2].lower() and tp_line_ids(f) and f[5].get('box')]
+        captioned = [f for f in tables if TP_LABEL.match(label_fix(f[2])) and f[5].get('caption_box') and f[5].get('box')
+                     and not re.search(r'\((?:continued|cont\.)', f[2], re.I)]
+        owners = {}
+        for u in orphans:
+            a = angle_of(u); fr = frame(a); ub = fr(u[5]['box'])
+            found = []
+            for c in captioned:
+                if c[5].get('image_only') or c[5].get('outline_art'): continue   # TP3: never paired
+                if angle_of(c) != a: continue
+                cb = fr(c[5]['caption_box']); rb = fr(c[5]['box'])
+                if not (cb[3] - .5 * body <= ub[1] and rb[1] - .5 * body <= ub[1] <= rb[3]): continue
+                if max(0.0, min(rb[2], ub[2]) - max(rb[0], ub[0])) < .5 * max(1e-6, ub[2] - ub[0]): continue
+                between = [o for o in floats if o is not c and o is not u and o[5].get('caption_box')
+                           and cb[3] - 1 <= fr(o[5]['caption_box'])[1] <= ub[1]
+                           and min(fr(o[5]['caption_box'])[2], ub[2]) > max(fr(o[5]['caption_box'])[0], ub[0])]
+                if between: continue
+                found.append(c)
+            if len(found) == 1: owners.setdefault(id(found[0]), (found[0], []))[1].append(u)
+            elif found:
+                _PAIRING_PENDING.append(('TP2', p['page'], u[5]['box'], 'uncaptioned_part_under_two_captions', None))
+        for c, us in owners.values():
+            if c[3]:
+                # TP2 with a grid: the grid stays as printed, the split is doubtful
+                _PAIRING_PENDING.append(('TP2', p['page'], hull([c[5]['box']] + [u[5]['box'] for u in us]),
+                                         'table_split_over_two_blocks', TP_LABEL.match(label_fix(c[2]))[0]))
+                continue
+            cap_ids = list(c[5].get('caption_ids') or [])
+            if not tp_line_ids(c) and len(us) == 1:
+                u = us[0]
+                source = dict(u[5]['table_source'], caption_ids=cap_ids)
+                rows, notes, rule = u[3], u[4], 'TP1'
+            else:
+                ids = tp_line_ids(c).union(*(tp_line_ids(u) for u in us))
+                source = table_source([runs[m] for m in ids if m in runs], p, cap_ids, preserve_run_lines=True)
+                owned = set(ids)
+                for f in [c] + us: owned |= set((f[5].get('table_source') or {}).get('owned_run_ids', []))
+                source['owned_run_ids'] = sorted(owned - set(cap_ids), key=str)
+                printed = compact(' '.join(l['text'] for l in source['lines']))
+                rows, rule = [], 'TP1' if not tp_line_ids(c) else 'TP2'
+                notes = [n for f in [c] + us for n in f[4] if compact(n) not in printed]
+            placement = dict(c[5], table_source=source, box=hull([c[5]['box']] + [u[5]['box'] for u in us]),
+                             image_only=False, outline_art=0, graphic_box=None, tp_paired=rule)
+            placement.pop('after_block', None)
+            floats[floats.index(c)] = (c[0], 'table', c[2], rows, notes, placement)
+            for u in us: floats.remove(u)
+            if rows:
+                stale = f"page {p['page']}: {c[2].split('.')[0]}: its rows could not be read (table, layout uncertain)"
+                page_uncertain[i] = [m for m in page_uncertain[i] if m != stale]
+        # TP1: a label rule 4 left unpaired that the uncaptioned table prints among its own lines names that table
+        labelled = {(float_label(f[2]) or {}).get('id') for f in floats if f[1] == 'table' and 'no caption' not in f[2].lower()}
+        rest = [f for f in floats if f[1] == 'table' and 'no caption' in f[2].lower() and tp_line_ids(f)]
+        member = {b['id']: set(b.get('members', [])) for b in p.get('blocks', [])}
+        loose = []
+        for entry in p.get('unpaired', []):
+            label = float_label(entry.get('caption', '') or '')
+            if not label or label['kind'] != 'table' or label['id'] in labelled: continue
+            if not TP_LABEL.match(label_fix(entry.get('caption', ''))): continue
+            hosts = [u for u in rest if member.get(entry.get('block'), set()) & tp_line_ids(u)]
+            loose.append((label, hosts))
+        for label, hosts in loose:
+            if len(hosts) != 1 or sum(hosts[0] in h for _, h in loose) != 1: continue
+            u = hosts[0]
+            floats[floats.index(u)] = (u[0], 'table', label['id'], u[3], u[4], dict(u[5], tp_paired='TP1', tp_label=True))
+            rest.remove(u); labelled.add(label['id'])
+        # TP1: the same where the uncaptioned table's own first printed line is its label line (the label, then a
+        # separator or the end of the line), a label no other float of the page names
+        for u in list(rest):
+            first = ((u[5].get('table_source') or {}).get('lines') or [{}])[0].get('text', '')
+            m = re.match(r'^\s*((?:(?:Supplemental|Supplementary)\s+)?Table\s+S?' + TABLE_NUMBER + r')(?:\s*[.:|–—-]|\s*$)',
+                         first, re.I)   # the printed text: label_fix would add a separator
+            label = float_label(m[1]) if m else None
+            if not label or label['id'] in labelled or sum(1 for f in rest if f is not u and
+                    re.match(r'\s*' + re.escape(m[1]) + r'(?![\w])', ((f[5].get('table_source') or {}).get('lines') or [{}])[0].get('text', ''), re.I)): continue
+            floats[floats.index(u)] = (u[0], 'table', label['id'], u[3], u[4], dict(u[5], tp_paired='TP1', tp_label=True))
+            rest.remove(u); labelled.add(label['id'])
+        # TP3, and TP1 for a caption left with no lines: listed as doubtful, the copy as printed
+        for f in floats:
+            if f[1] != 'table' or not f[5].get('caption_box') or not TP_LABEL.match(label_fix(f[2])): continue
+            label = TP_LABEL.match(label_fix(f[2]))[0]
+            if f[5].get('outline_art') or f[5].get('image_only'):
+                _PAIRING_PENDING.append(('TP3', p['page'], f[5]['caption_box'], 'table_without_text_layer', label))
+            elif not f[3] and not tp_line_ids(f):
+                _PAIRING_PENDING.append(('TP1', p['page'], f[5]['caption_box'], 'caption_without_lines', label))
+        per_page[i] = (blocks, floats, side)
+
+
+def pairing_doubts(path):
+    """The doubtful places of rules TP1 to TP3, each with the copy line that prints its table's label."""
+    try:
+        with open(path, encoding='utf-8') as f: lines = f.read().split('\n')
+    except OSError: lines = []
+    for rule, page, box, reason, label in _PAIRING_PENDING:
+        line = None
+        if label:
+            pattern = re.compile(r'^\*\*' + re.escape(label) + r'(?![\w])')
+            line = next((n for n, value in enumerate(lines, 1) if pattern.match(value)), None)
+        doubt_list().add(rule, page, box, reason, line=line)
+    del _PAIRING_PENDING[:]
 
 
 # ---------------------------------------------------------------- layout grid
@@ -6969,6 +8682,90 @@ def grid_note_rows(rows, source, notes):
     return rows, notes, None
 
 
+# Round 7 TE3 (lane r7-edges): a note mark that opens a table note: a note symbol, a raised letter before a capital,
+# a note word, or a P-value key. The looser LAYOUT_NOTE also takes "Word, " openings, which data rows share.
+TE3_NOTE_MARK = re.compile(r'^(?:Notes?\b|Abbreviations?\b|Sources?\b|Legend\b|Key\b|[*†‡§¶#]|[a-z]\s?[A-Z]|P\s?[*<>=])')
+
+
+def te3_table_notes(source):
+    """Round 7 rule TE3 with TE2 (lane r7-edges): the notes of a table printed as a line list.
+
+    The table body ends at its lowest long rule (as wide as half the table's frame or more). The source lines
+    under that rule, from the first to the last, are the table's notes when one of them opens with a note mark
+    (TE3_NOTE_MARK), each is one printed piece (no gap wider than two line heights inside it), and each goes on
+    under the one above (no gap over a line, no taller type, opening with a note mark or starting near the
+    first note line's left edge): they print after the list as notes, never as its rows. -> (note lines, doubt):
+    doubt is True where a note mark opens a line under the lowest rule but the lines under it do not all read
+    as notes (TE10: the list stays as it was)."""
+    lines=[l for l in source.get('lines',[]) if l.get('items')]
+    fb=source.get('frame')
+    if len(lines)<3 or not fb:return [],False   # (lane r8-turned: a turned part is read in its upright frame, as all its source is)
+    box=lambda l:hull(x['box'] for x in l['items'])
+    h=statistics.median(x['box'][3]-x['box'][1] for l in lines for x in l['items'])
+    rules=[g['box'] for g in source.get('graphics',[]) if g.get('kind')=='rule' and g['box'][3]-g['box'][1]<.3*h
+           and g['box'][2]-g['box'][0]>=.5*(fb[2]-fb[0]) and x_overlap(g['box'],fb)>.8]
+    rules=[r for r in rules if fb[1]-h<=r[1]<=fb[3]+h]
+    if not rules:return [],False
+    low=max(r[1] for r in rules)
+    if not any(box(l)[1]>=low and TE3_NOTE_MARK.match(l['text'].strip()) for l in lines):return [],False
+    # TE2 with TE3: the lines under the lowest rule, from the first one, are the notes when one of them opens with a
+    # note mark and they read as one note block
+    k=next(i for i,l in enumerate(lines) if box(l)[1]>=low)
+    tail=lines[k:]
+    one_piece=lambda l:not any(b['box'][0]-a['box'][2]>2*h for a,b in zip(l['items'],l['items'][1:]))
+    # the rule stands between the last line above and the first note line; each later line goes on under the one
+    # above (no gap over a line, no taller type) and opens with a note mark or starts near the notes' left edge
+    if k<2 or box(lines[k-1])[3]>low+.2*h or not all(box(l)[1]>=low and one_piece(l) for l in tail):
+        return [],True
+    nl=box(tail[0])[0];nh=box(tail[0])[3]-box(tail[0])[1]
+    for a,b in zip(tail,tail[1:]):
+        ba,bb=box(a),box(b)
+        if bb[1]-ba[3]>h or bb[3]-bb[1]>1.3*nh or not (TE3_NOTE_MARK.match(b['text'].strip()) or nl-h<=bb[0]<=nl+3*h):
+            return [],True
+    return tail,False
+
+
+def r8_source_fit(source, page):
+    """lane r8-turned: the overlay (overlay.fit, rules TG1-TG7) laid over a table source's printed lines and drawn marks
+    as the source records them (its upright frame), with no render; None where it cannot be laid"""
+    lines=[dict(items=[(list(x['box']),x['text'],{}) for x in l['items']]) for l in source.get('lines',[]) if l.get('items')]
+    fb=source.get('frame')
+    if len(lines)<2 or not fb: return None
+    h=statistics.median(x['box'][3]-x['box'][1] for l in source['lines'] for x in l.get('items',[]))
+    graphics=[(list(g['box']),g['kind']) for g in source.get('graphics',[]) if g['box'][0]<=fb[2]+h and g['box'][2]>=fb[0]-h
+              and g['box'][1]>=fb[1]-2*h and g['box'][3]<=fb[3]+2*h]
+    k=((page or {}).get('params') or {}).get('dpi',150)/72
+    try: return overlay_module().fit(lines,graphics,k)
+    except Exception: return None
+
+
+def r8_page_box(source):
+    """lane r8-turned: a table source's frame (in its upright frame) as a box of the page, for the doubt list"""
+    fb=source['frame']
+    return frame_box_back(source.get('angle',0))(fb) if round(source.get('angle',0))%360 else fb
+
+
+def te3_grid_notes(rows, source, notes):
+    """Round 7 rule TE3 (lane r7-edges) for a grid: the bottom rows made only of the words of the note lines under
+    the table's lowest long rule (te3_table_notes) leave the grid and print as its notes, the lines as printed.
+    The words must match one for one; otherwise the grid stays and the place is a doubt. -> (rows, notes,
+    evidence or None, doubt)"""
+    lines,doubt=te3_table_notes(source)
+    if not lines or not rows:return rows,notes,None,doubt
+    norm=lambda t:' '.join(t.split())
+    have={norm(n) for n in notes}
+    lines=[l for l in lines if norm(l['text']) not in have]   # notes the grid already printed as notes
+    if not lines:return rows,notes,None,False
+    want=collections.Counter(w for l in lines for w in norm(l['text']).split())
+    words=lambda row:[w for cell in (row or []) for part in (cell or []) for w in norm(part).split()]
+    k=len(rows);got=collections.Counter()
+    while k>0 and rows[k-1] is not None and words(rows[k-1]) and not (collections.Counter(words(rows[k-1]))-(want-got)):
+        got.update(words(rows[k-1]));k-=1
+    if got!=want or k==0 or rows[k-1] is None:return rows,notes,None,True
+    texts=[norm(l['text']) for l in lines]
+    return rows[:k],texts+list(notes),dict(rows=len(rows)-k,witness='note mark under the lowest rule (TE3)',lines=texts),False
+
+
 def gate_tables(items, pages, uncertain):
     """Make one document-wide decision for every rendered table, retaining all source lines.
     Shared source runs identify duplication; identical short values in unrelated cells do not.
@@ -6982,9 +8779,67 @@ def gate_tables(items, pages, uncertain):
     for it in tables:
         source=it.get('table_source',dict(lines=[]))
         note_rows=None;before=None
+        # Rule TC7 and memo 1 (r7-columns): a table the column rules changed is checked as BASE read it too. When
+        # BASE's reading fails a structure check that the new grid passes, the new grid stands only for a header of
+        # one tier; a header of several tiers keeps BASE's reading (and BASE's verdict).
+        base_rows=next((getattr(r,'r7_base',None) for r in it.get('rows') or [] if r is not None and getattr(r,'r7_base',None)),None)
+        if base_rows and it.get('rows') and not it.get('image_only') and not it.get('scan'):
+            cap_=source.get('title_caption',it['caption'])
+            def fired_(rows_):
+                rr,nn,_=grid_note_rows(rows_,source,it.get('notes',[]))
+                return {k for k,v in table_structure_checks(rr,source,cap_,nn).items() if v['fired']}
+            bf,nf=fired_(base_rows[0]),fired_(it['rows'])
+            tiers_=max((getattr(r,'r7_tiers',0) for r in it['rows'] if r is not None),default=0)
+            it['_r7_gate']=dict(base_fired=sorted(bf),new_fired=sorted(nf),tiers=tiers_,
+                                changed=sorted({c for r in it['rows'] if r is not None for c in getattr(r,'r7_changed',[])}),
+                                placed=next((getattr(r,'r7_placed',[]) for r in it['rows'] if r is not None),[]))
+            if bf and not nf and tiers_>=2:
+                for r in base_rows[0]:
+                    if r is not None: r.r7_doubts=getattr(it['rows'][0],'r7_doubts',[])
+                it['rows']=base_rows[0]; it['_r7_gate']['kept_base']=True
+        # Rules TG1-TG7 (r8-overlay): a grid the overlay changed is checked as the program read it without the overlay
+        # too. The overlay's grid stands only where both readings pass the structure checks. Where the other reading
+        # fails a check (BASE prints the table as a flagged line list), the list stays: printing a flagged table as
+        # a grid from the overlay (step 3) is not built, the measured count does not support it. Where the overlay's
+        # grid fails a check the other reading passes, the marks disagree: the other reading stays, the place is listed.
+        r8_=next((getattr(r,'r8',None) for r in it.get('rows') or [] if r is not None and getattr(r,'r8',None)),None)
+        if r8_ and r8_.get('fit') and it.get('rows') and not it.get('image_only') and not it.get('scan'):
+            fit8=r8_['fit']
+            it['_r8']=dict(clean=fit8['clean'],test=fit8['test'],counts=fit8['counts'],rendered=fit8['rendered'],
+                           drawn=sum(fit8['drawn']),changed=list(r8_['changed']),
+                           pairs=len(r8_.get('pairs',[])),
+                           pairs_differ=sum(1 for a,bn,on,d in r8_.get('pairs',[]) if bn!=on and not d),
+                           one_line_rows_overlay=all(fit8['cell_row']),
+                           one_line_rows_base=bool(r8_.get('pairs')) and all(bn for a,bn,on,d in r8_['pairs']),
+                           col_lines=[round(x,1) for x in fit8['col_lines']],box=[round(v,1) for v in fit8['box']],
+                           row_y=[round(y,1) for y in fit8['row_y']],cell_row=[int(x) for x in fit8['cell_row']],
+                           drawn_why=[''.join(w[0] for w in x) for x in fit8['drawn_why']],angle=source.get('angle',0))
+            g8=r8_.get('grid')
+            if fit8.get('bands') is not None: it['_r8']['bands']=fit8['bands']
+            # TG14 coarse grid: full-width row borders (after line index) and full-height column lines (column line index);
+            # every other drawn border is a division inside a coarse cell (recorded, nothing printed for it)
+            it['_r8']['coarse']=dict(rows=fit8.get('coarse_rows',[]),cols=fit8.get('coarse_cols',[]),
+                                     inner_rows=[q for q,d in enumerate(fit8['drawn']) if d and q not in fit8.get('coarse_rows',[])])
+            if g8: it['_r8'].update(settings=g8['settings'],texts0=g8['texts0'],decided=g8['decided'],cellrows=g8['cellrows'],body_merged=g8['body_merged'],row_labels=g8['row_labels'],header_spans=g8['header_spans'],cond=dict(a=g8['a'],b=g8['b'],b2=g8['b2'],c=g8['c'],d=g8['d'],r=g8['r'],g=g8['g'],n=g8['n'],u=g8['u']),header_lines=g8['header'],halves=g8['halves'],lines_pt=g8['lines_pt'],
+                                    grid=[[' '.join(c) for c in r['cells']] for r in g8['rows']],grid_lines=[r['lines'] for r in g8['rows']])
+            if r8_.get('base') is not None:
+                cap_=source.get('title_caption',it['caption'])
+                def fired8(rows_):
+                    rr,nn,_=grid_note_rows(rows_,source,it.get('notes',[]))
+                    return {k for k,v in table_structure_checks(rr,source,cap_,nn).items() if v['fired']}
+                bf,nf=fired8(r8_['base'][0]),fired8(it['rows'])
+                it['_r8'].update(base_fired=sorted(bf),new_fired=sorted(nf),grid_changed=True)
+                if bf or nf:
+                    if nf-bf: doubt_list().add('TG6',it['page'],it.get('box') or [0,0,0,0],'overlay_grid_fails_a_check')
+                    for r in r8_['base'][0]:
+                        if r is not None: r.r8=dict(r8_,doubts=[],base=None)
+                    it['rows']=r8_['base'][0]; it['_r8']['kept_base']=True
         if it.get('rows') and not it.get('image_only') and not it.get('scan'):
             original=(it['rows'],it.get('notes',[]))
             it['rows'],it['notes'],note_rows=grid_note_rows(it['rows'],source,it.get('notes',[]))
+            if not note_rows:
+                it['rows'],it['notes'],note_rows,te3_doubt=te3_grid_notes(it['rows'],source,it.get('notes',[]))
+                if te3_doubt and source.get('frame'):edges_doubt(it['page'],r8_page_box(source),'table_note_marks_disagree')
             # Moving note rows repairs rendering only: it never clears a check
             # the grid failed with its note rows (PLOS pntd.0000278 Table 4).
             if note_rows:before=table_structure_checks(original[0],source,source.get('title_caption',it["caption"]),original[1])
@@ -7040,6 +8895,8 @@ def gate_tables(items, pages, uncertain):
         records.append(dict(page=it['page'],id=it.get('id'),caption=it['caption'],
                             angle=source.get('angle',0),checks=checks))
         if note_rows: records[-1]['note_rows']=note_rows
+        if it.get('_r7_gate'): records[-1]['r7_columns_gate']=it.pop('_r7_gate')
+        if it.get('_r8'): records[-1]['r8_overlay']=it.pop('_r8')
         records[-1]['row_spans']=[dict(column=ci+1,**span) for row in it['rows'] if row
                                   for ci,span in getattr(row,'row_spans',{}).items()]
     for i,(it,rec) in enumerate(zip(tables,records)):
@@ -7073,9 +8930,111 @@ def gate_tables(items, pages, uncertain):
                 if source.get('title_ids'):
                     it['caption'] = source['title_caption']; it['caption_ids'] = list(source.get('caption_ids',[]))
                     source.pop('title_ids'); source.pop('title_caption')
+        # lane r8-turned: a turned part that gained its caption in its upright frame (TF7, the wide label list) was a
+        # part with its label lines among its rows at BASE. Its grid stands where its rows agree with the overlay's cell
+        # rows (the overlay laid over the part's printed lines: a row line where a drawn line parts two lines or where
+        # cells start level in two or more columns); where the grid has fewer rows than the overlay finds, it joins
+        # lines the overlay parts (the marks disagree): the part keeps the flagged form of printed lines (N) and the
+        # place is listed (AV25 p4: the sub-rows of each coarse block joined in one row)
+        if it.get('r8_turned_caption') and not fired and it.get('rows') and not it.get('scan') and not it.get('image_only'):
+            fit_t=r8_source_fit(source,by_page[it['page']])
+            if fit_t and fit_t['counts']['cell_rows']>len([r for r in it['rows'] if r is not None]):
+                fired=['turned_caption_rows_disagree']
+                rec['checks']['turned_caption_rows_disagree']=dict(evaluated=True,fired=True,evidence=[])
+                r8_doubt(it['page'],it.get('box') or [0,0,0,0],'turned_caption:grid_rows_disagree_with_overlay')
         rec['fired']=fired;rec['decision']='printed_lines' if fired else ('grid' if it['rows'] else 'unchanged_lines')
+        # A flagged table over which the overlay fits clean with one printed line to a row on both readings (step 3):
+        # the list stays (not built) and the place is listed, the overlay's grid being a possible reading.
+        # Step 3 (r8-overlay, send-back 3; the user's ruling TG8-TG11: the overlay is the raw cells, one printed line to
+        # a raw row): a flagged table part is printed as a grid from the overlay's cells where the page conditions hold
+        # under which every part found was wholly right (overlay_grid: a one panel, d whole header spans and no caption
+        # line, r row lines keep off the words, g no column line cuts a group, n no note as the last row, u an upright
+        # part whose page render was read), and the part shares no lines with another table part (duplicate_cells). The header's merged cells are repeated over their columns; the
+        # caption and notes stay; every word of the printed lines must be in the grid or the notes, else the list stays.
+        o8=rec.get('r8_overlay') or {}
+        if 'r8_overlay' not in rec and source.get('_overlay_rows'): rec['r8_overlay']=o8   # (ROWS_OVERLAY) its record is kept
+        # (ROWS_OVERLAY) a part kept with no rows lays the overlay from the rows read for it alone (source _overlay_rows)
+        rows8=it.get('rows') or source.get('_overlay_rows') or []
+        r8g=next((getattr(r,'r8',{}).get('grid') for r in rows8 if r is not None and getattr(r,'r8',None)),None)
+        r8gf=next((getattr(r,'r8',{}).get('grid_forms') for r in rows8 if r is not None and getattr(r,'r8',None)),None) or {}
+        def r8_printable(g_):
+            return bool(g_ and g_['a'] and g_['d'] and g_['r'] and g_['g'] and g_['n'] and g_['u'] and g_['decided'] and g_['s']
+                        and (g_['h'] or not g_.get('forms')) and g_['foot_ok'] and g_['header_settled'])
+        if fired and r8g and not it.get('scan'):
+            # (lane r8-overlay2, the measure) which loosening forms would let this flagged part through, and its grid
+            o8['forms']={nm:dict(foot_ok=g_['foot_ok'],header_settled=g_['header_settled'],notes=len(g_['notes']),h=g_['h'],s=g_['s'],a=g_['a'],d=g_['d'],g=g_['g'],r=g_['r'],n=g_['n'],u=g_['u'],decided=g_['decided'],
+                                 label_lines=g_['label_lines'],merged_cells=g_['merged_cells'],printable=r8_printable(g_),
+                                 trim_top=g_['trim_top'],trim_bottom=g_['trim_bottom'],spanned=g_['spanned'],
+                                 grid=[([' '.join(c) for c in r_['cells']],r_.get('group',False)) for r_ in g_['rows']])
+                         for nm,g_ in r8gf.items()}
+            o8['forms']['none']=dict(printable=r8_printable(r8g))
+            if r8gf.get('clues'): o8['forms']['clues']['tw17ref']=r8gf['clues'].get('tw17ref')
+        # (lane r8-overlay2) the forms built: a merged label row (TG13) and condition a judged on the rows of two or more
+        # columns, each wholly right on every development part it let through (with s, every group in a cell of its
+        # own); 'merge' let none through and is not built. A label row prints as the program prints a group row.
+        # Pass 2: 'hspan' (a header label's span from its underline or the lower header cells it is centred over) is
+        # built too, with h; 'trim' and 'rowlabel' let no part through and are not built.
+        # Pass 3: the marks 'shade2' (a change of shading read in colour) and 'cent' (values centred beside a two-line
+        # label) are built: right on every labelled boundary where they speak, read on the page; 'band' and 'gap' are
+        # wrong on true row borders (AP23 p7 shading down a column; AP01, AQ18, AU03 gaps) and are not built.
+        # Lane r9-rowclues (build order 2026-11-17, the user's ruling on TW6: lines and shading from the start): a part
+        # still a flagged list under the built forms is read with the user's row clues (RULES-TF.md TW1-TW7): a drawn
+        # line or a change of shading between two lines is a border from the start; then TW1, TW2 (as the user wrote it;
+        # the builder's exception under a leftmost text left open is the recorded form 'cluesO' only, memo clues-1),
+        # TW3-TW5, then TW6 for what is still undecided. It prints only when every boundary is decided and the other
+        # conditions pass. Grids printed before are not touched. (The other order, 'PROCu', clues before lines, is a recorded form only.)
+        form8=None
+        if fired and r8g and not r8_printable(r8g) and r8_printable(r8gf.get('built')):
+            r8g=r8gf['built']; form8='+'.join(f_ for f_ in ('label','a2','hspan','shade2','cent') if r8_printable(r8gf.get(f_))) or 'built forms'
+        elif fired and r8g and not r8_printable(r8g) and r8_printable(r8gf.get('clues')):
+            r8g=r8gf['clues']; form8='clues'   # the user's row clues in the user's order, flagged parts only
+        # (TW20 T1P, a switch) caption title rows that are exactly lines T1 took out of the part do not refuse it: those
+        # lines are the title outside the table and print with the caption, once
+        t1p=bool('T1P' in R8_CLUE_FLAGS and r8g and source.get('title_ids') and r8g.get('trim_ids')
+                 and set(map(str,source['title_ids']))<=set(map(str,r8g['trim_ids'])))
+        # (2b, F4, TW20, a switch TW20H, off) a title in the table itself is a header: a part whose title lines stay in the
+        # overlay's grid prints them there as its top header rows, and its caption is the label line alone; the title
+        # lines are no reason to hold it ("No rule takes it out"); T1P stays as built
+        tw20h=bool('TW20H' in R8_CLUE_FLAGS and r8g and source.get('title_ids') and not t1p)
+        if (fired and r8g and not it.get('scan') and not it.get('image_only') and (not source.get('title_ids') or t1p or tw20h)
+                and r8_printable(r8g) and 'duplicate_cells' not in fired):
+            if t1p or tw20h:   # the caption as a written grid takes it (tablesub8); under TW20H the label line alone
+                it['caption']=source['title_caption']; it['caption_ids']=list(source.get('caption_ids',[]))
+            grid_words=collections.Counter(w for r in r8g['rows'] for c in r['cells'] for t in c for w in t.split())
+            if r8g.get('trim_top'):   # (B6) the title lines taken out of the part print with the caption
+                cap_=it.get('caption') or ''
+                for t_ in r8g['trim_top']:
+                    if t_ not in cap_: cap_=(cap_+' '+t_).strip()
+                    grid_words.update(t_.split())
+                it['caption']=cap_
+            grid_words.update(w for n in it.get('notes',[]) for w in n.split())
+            line_words=collections.Counter(w for l in source.get('lines',[]) for w in l.get('text','').split())
+            if not (line_words-grid_words):
+                it['rows']=[TableRow([list(c) for c in r['cells']],header=r['header'],group=bool(r.get('group'))) for r in r8g['rows']]
+                if r8g.get('notes'): it['notes']=list(r8g['notes'])+[n_ for n_ in it.get('notes',[]) if n_ not in r8g['notes']]   # (memo 1) foot notes print after the grid
+                rec['printed_from_overlay']=dict(condition='a+d+r+g+n+u+s, every boundary decided, no duplicate_cells'+(', form '+form8 if form8 else ''),
+                                                 form=form8 or 'none',fired=list(fired)); o8['printed_from_overlay']=True
+                doubt_list().add('TG6',it['page'],it.get('box') or [0,0,0,0],'printed_as_grid_from_overlay')
+                fired=[]; rec['fired']=fired; rec['decision']='grid'; it['_r8_printed']=True
+            else:
+                o8['words_missing_from_overlay_grid']=sum((line_words-grid_words).values())
         # A written grid leaves the caption's title rows to the caption (tablesub8).
         if not fired and it.get('rows'): it['rows']=[r for r in it['rows'] if not getattr(r,'title',False)]
+        # The column doubts of a written grid (rules TC4, TC5, TC7; r7-columns), once per place.
+        if rec['decision']=='grid' and not it.get('scan'):
+            seen=set()
+            for r in it['rows']:
+                for rule,box,reason in getattr(r,'r7_doubts',()) or ():
+                    key=(rule,reason,tuple(round(v,1) for v in box))
+                    if key not in seen:
+                        seen.add(key); doubt_list().add(rule,it['page'],box,reason)
+            # the overlay's row doubts of a written grid (rule TG7, r8-overlay), once per place
+            r8_=next((getattr(r,'r8',None) for r in it['rows'] if r is not None and getattr(r,'r8',None)),None)
+            for rule,ls,reason in (r8_ or {}).get('doubts',()):
+                box=hull(e['box_px'] for L in ls for b,t,e in L['items'])
+                key=(rule,reason,tuple(round(v,1) for v in box))
+                if key not in seen:
+                    seen.add(key); doubt_list().add(rule,it['page'],box,reason)
         if fired:
             # Once the grid fails, its proposed note boundary is unverified
             # too. Keep every source baseline under the counted flag; retain
@@ -7087,6 +9046,12 @@ def gate_tables(items, pages, uncertain):
                 if texts[key]:texts[key]-=1
                 else:external.append(note)
             it['notes']=external
+            # TE3 (lane r7-edges): the lines under the lowest rule that open with a note mark are the table's notes
+            if not it.get('scan'):
+                te3,doubt=te3_table_notes(source)
+                if te3:it['notes']=[l['text'] for l in te3]+external
+                elif doubt and source.get('frame'):
+                    edges_doubt(it['page'],r8_page_box(source),'table_note_marks_disagree')
         rec['printed_lines']=[l['text'] for l in table_printed_lines(source,it.get('notes',[]),written=True)]
         rec['notes']=it.get('notes',[])
         rec['source_line_count']=len(source.get('lines',[]))
@@ -8488,6 +10453,1159 @@ def release_body_column_seeds(p, body):
         release_table_runs(p,dict(id=b['id']),ms,body)
 
 
+def edges_doubt(page, box, reason):
+    """Round 7 rule TE10: one doubt-list entry per place (a page can be read twice)."""
+    if _R8_VIEW_BACK[0]:box=_R8_VIEW_BACK[0](box)   # lane r8-turned: a place found in a turned part's frame
+    box=[round(float(v),1) for v in box]
+    if any(d['rule']=='TE10' and d['page']==page and d['box']==box and d['reason']==reason for d in doubt_list().items()):return
+    doubt_list().add('TE10',page,box,reason)
+
+
+def prose_page_columns(p, rs, body):
+    """The page columns that are columns of body prose for the round 7 edge rules (lane r7-edges): at least twelve
+    body ems wide, and not the table's own tracks: a page whose inferred columns start at two or more of the
+    table's inner column starts (left edges shared by three of its runs) is a table page and has none."""
+    columns=[(l,r) for l,r in (p.get('main_text') or {}).get('columns',[]) if r-l>=12*body]
+    tracks=[]
+    for x in sorted(e['box_px'][0] for e in rs):
+        if tracks and x-tracks[-1][0]<.3*body:tracks[-1][1]+=1
+        else:tracks.append([x,1])
+    tracks=[x for x,n in tracks if n>=3]
+    if sum(any(abs(l-tr)<.5*body for tr in tracks[1:]) for l,r in (p.get('main_text') or {}).get('columns',[]))>=2:return []
+    return columns
+
+
+def body_look_row(row, p, body, column):
+    """Round 7 rule TE6: a printed row of one page column that has the body's look: every run in the body size
+    (within 5 %) and, where the faces are known, mostly in the paper's body face; the row starts on the column's
+    left edge (within half an em) or at a first-line indent (up to two ems) and fills most of the column."""
+    if any(round(e.get('angle',0))%360 for e in row):return False
+    if not all(.95*body<=e.get('run_size_px',0)<=1.05*body for e in row):return False
+    face=p.get('_body_face')
+    if face:
+        counts=collections.Counter()
+        for e in row:counts.update(e.get('_faces') or {})
+        if counts and counts.get(face,0)<.8*sum(counts.values()):return False
+    left,right=column;b=hull(e['box_px'] for e in row)
+    if len(' '.join(e['text'] for e in row).split())<5:return False   # a prose line, not a cell
+    return -.5*body<=b[0]-left<=2*body and b[2]-b[0]>=.6*(right-left) and b[2]<=right+body
+
+
+def table_body_look_bound(p, body):
+    """Round 7 rules TE2 and TE6 (lane r7-edges): body text under a table's lowest drawn mark leaves the table.
+
+    A table part ends at its lowest long rule or fill (TE2). Under that mark, in one page column, the rows walked
+    downward are the table's notes while they are set smaller than the body, or open with a note mark and go on
+    at their own pitch. The first row after them set at least in the body size starts body matter when it and
+    the rows under it give three rows with the body's look (TE6: on the column's left edge or a first-line
+    indent, body size and face, filling the column) one body line pitch apart. From that row down, every run of
+    the part inside that page column is body text and returns to the column stream. Where a row so released is
+    a label with values, lies inside the table's drawn structure or is a note under it (table_line_stays), the
+    marks disagree: the part stays as it was and the place goes on the doubt list (TE10). Upright parts only."""
+    columns=(p.get('main_text') or {}).get('columns',[])
+    if not columns:return
+    runs={e['id']:e for e in p['elements'] if e['kind']=='text'}
+    furniture=table_furniture(p)
+    for index,t in enumerate(list(p.get('tables',[]))):
+        if round(t.get('angle',0))%360:continue
+        if not any(t['id'] in f['blocks'] and re.match(r'^Table\s+'+TABLE_NUMBER+r'\b',label_fix(f.get('caption','')),re.I)
+                   for f in p.get('floats',[])):continue
+        rs=[runs[m] for m in t['members'] if m in runs and m not in furniture and not round(runs[m].get('angle',0))%360]
+        if len(rs)<6:continue
+        tb=hull(e['box_px'] for e in rs)
+        # the table's own drawn marks: long horizontal rules and fills across its width, starting above its last run
+        marks=[e['box_px'] for e in p['elements'] if e['kind'] in ('rule','fill')
+               and e['box_px'][2]-e['box_px'][0]>=.5*min(tb[2]-tb[0],max(r-l for l,r in columns))
+               and x_overlap(e['box_px'],tb)>.8 and tb[1]-2*body<=e['box_px'][1]<tb[3]
+               and (e['kind']=='fill' or e['box_px'][3]-e['box_px'][1]<.3*body)]
+        if not marks:continue
+        bottom=max(b[3] for b in marks)
+        released=[];cuts=[]
+        for left,right in prose_page_columns(p,[e for e in rs if e['box_px'][3]<=bottom+.2*body],body):
+            mine=[e for e in rs if left-body<=e['box_px'][0] and e['box_px'][2]<=right+body and e['box_px'][1]>=bottom-.2*body]
+            rows=text_rows(mine)
+            if len(rows)<3:continue
+            start=None;in_note=False;prev=None
+            for k,row in enumerate(rows):
+                b=hull(e['box_px'] for e in row);text=' '.join(e['text'] for e in row).strip()
+                size=statistics.median(e.get('run_size_px',0) for e in row)
+                gap=b[1]-prev[3] if prev else None
+                prev=b
+                if size<.95*body:in_note=bool(in_note or LAYOUT_NOTE.match(text));continue
+                if LAYOUT_NOTE.match(text):in_note=True;continue
+                if in_note and gap is not None and gap<.5*body:continue
+                in_note=False;start=k;break
+            if start is None:continue
+            # a row right under the lowest mark (within one line) with no note between stands where a table's notes
+            # stand: the marks disagree (TE10)
+            if start==0 and min(e['box_px'][1] for e in rows[0])-bottom<1.2*body:
+                if sum(body_look_row(row,p,body,(left,right)) for row in rows[:4])>=3:
+                    edges_doubt(p['page'],[left,bottom,right,max(e['box_px'][3] for e in rows[min(3,len(rows)-1)])],'body_look_under_rule_at_note_place')
+                continue
+            look=[row for row in rows[start:start+4] if body_look_row(row,p,body,(left,right))]
+            if len(look)<3:continue
+            cy=[(hull(e['box_px'] for e in r)[1]+hull(e['box_px'] for e in r)[3])/2 for r in look]
+            pitches=[b2-a for a,b2 in zip(cy,cy[1:])]
+            if not all(1.0*body<=d<=1.6*body for d in pitches) or max(pitches)-min(pitches)>.15*body:continue
+            top=min(e['box_px'][1] for e in rows[start])
+            cuts.append([left,top,right,max(e['box_px'][3] for e in mine)])
+            released.extend(e for row in rows[start:] for e in row)
+        if not released:continue
+        ids={e['id'] for e in released}
+        kept=[e for e in rs if e['id'] not in ids]
+        if len(text_rows(kept))<2:continue
+        kb=hull(e['box_px'] for e in kept)
+        extents=table_ruled_extents(p,kb,body)
+        if any(table_line_stays(p,e,body,kb,0,extents) for e in released):
+            for c in cuts:edges_doubt(p['page'],c,'table_bottom_marks_disagree')
+            continue
+        members=[m for m in t['members'] if m not in ids]
+        new=dict(t,members=members,box_px=hull(runs[m]['box_px'] for m in members if m in runs),
+                 _copy_body_bottom=min(c[1] for c in cuts))
+        if t.get('_copy_region'):new['_copy_region']=[t['_copy_region'][0],t['_copy_region'][1],t['_copy_region'][2],min(c[1] for c in cuts)]
+        p['tables'][p['tables'].index(t)]=new
+        p.setdefault('copy_table_frames',[]).append(dict(id=t['id'],frame=new['box_px'],members=sorted(ids),
+            why='TE2/TE6: body-look rows under the lowest drawn mark are body text'))
+        release_body_rows(p,t,released,body)
+
+
+def table_top_bound(p, body):
+    """Round 7 rule TE1 (lane r7-edges, send-back item 2): a table starts under the lower of its caption's end and
+    its top drawn mark. When the drawn marks of an upright table part (rules and fills joined to its top, within
+    its width) reach to its first printed line, the runs inside their reach under the top mark that the part did not
+    take join it, taken out of any body block that held them: runs above its first printed line, runs inside a
+    header fill joined to the top mark, and a row's stub (a run at one of the table's column starts on the baseline
+    of a printed table line right of it). This acts only
+    where the caption end and the top mark agree: no line of the table's caption lies inside the marks' reach
+    under the top mark. Where they disagree, or a run taken in has the body look (TE6) or belongs to another
+    float, the part stays as it was and the place is a doubt (TE10)."""
+    runs={e['id']:e for e in p['elements'] if e['kind']=='text'}
+    furniture=table_furniture(p)
+    for t in list(p.get('tables',[])):
+        if round(t.get('angle',0))%360:continue
+        f=next((f for f in p.get('floats',[]) if t['id'] in f['blocks']
+                and re.match(r'^Table\s+'+TABLE_NUMBER+r'\b',label_fix(f.get('caption','')),re.I)),None)
+        if not f:continue
+        rs=[runs[m] for m in t['members'] if m in runs and m not in furniture and not round(runs[m].get('angle',0))%360]
+        if len(rs)<6:continue
+        tb=hull(e['box_px'] for e in rs)
+        marks=sorted((e['box_px'] for e in p['elements'] if e['kind'] in ('rule','fill')
+                      and (e['kind']=='fill' or e['box_px'][3]-e['box_px'][1]<.3*body)
+                      and e['box_px'][0]>=tb[0]-2*body and e['box_px'][2]<=tb[2]+2*body and e['box_px'][2]-e['box_px'][0]>=2*body
+                      and e['box_px'][1]<tb[1] and e['box_px'][3]>=tb[1]-12*body),key=lambda b:-b[3])
+        chain=[];top=tb[1]
+        for b in marks:
+            if b[3]>=top-.5*body:
+                chain.append(b);top=min(top,b[1])
+        if not chain:continue
+        reach=[min(b[0] for b in chain+[tb]),top,max(b[2] for b in chain+[tb]),tb[3]]
+        tracks=collections.Counter(round(e['box_px'][0]/(.5*body)) for e in rs)
+        def inside(e):
+            cx,cy=(e['box_px'][0]+e['box_px'][2])/2,(e['box_px'][1]+e['box_px'][3])/2
+            if not (reach[0]<=cx<=reach[2] and reach[1]-.2*body<=cy<reach[3]):return False
+            if cy<tb[1]:return True   # above the first printed line, under the top mark: header matter
+            if any(b[0]<=cx<=b[2] and b[1]<=cy<=b[3] for b in chain if b[3]-b[1]>.5*body):return True   # inside a header fill
+            # a row's stub: on the baseline of a printed table line right of it, at a column start of the table
+            k=round(e['box_px'][0]/(.5*body))
+            return (tracks[k]+tracks[k-1]+tracks[k+1]>=2 and
+                    any(abs((x['box_px'][1]+x['box_px'][3])/2-cy)<.35*body and x['box_px'][0]>e['box_px'][2] for x in rs))
+        cap={m for bid in f['blocks'] for b in p.get('blocks',[]) if b['id']==bid and b['id']!=t['id'] for m in b['members']}
+        cap|=set(f.get('_caption_ids',[]))
+        if any(inside(runs[m]) for m in cap if m in runs):
+            edges_doubt(p['page'],reach,'table_top_marks_disagree');continue
+        foreign={m for g in p.get('floats',[]) if g is not f for bid in g['blocks']
+                 for b in p.get('blocks',[])+p.get('tables',[]) if b['id']==bid for m in b['members']}
+        cand=[e for m,e in runs.items() if m not in t['members'] and m not in furniture and m not in cap
+              and not round(e.get('angle',0))%360 and e['text'].strip() and inside(e)]
+        if not cand:continue
+        columns=[(l,r) for l,r in (p.get('main_text') or {}).get('columns',[])]
+        if any(e['id'] in foreign for e in cand) or any(body_look_row(row,p,body,c) for row in text_rows(cand) for c in columns
+                                                         if c[0]-body<=row[0]['box_px'][0]<=c[1]):
+            edges_doubt(p['page'],reach,'table_top_marks_disagree');continue
+        ids={e['id'] for e in cand}
+        new=dict(t,members=list(t['members'])+[e['id'] for e in cand],box_px=hull([t['box_px']]+[e['box_px'] for e in cand]))
+        if t.get('_copy_region'):new['_copy_region']=[min(t['_copy_region'][0],reach[0]),min(t['_copy_region'][1],reach[1]),
+                                                    max(t['_copy_region'][2],reach[2]),t['_copy_region'][3]]
+        p['tables'][p['tables'].index(t)]=new
+        mt=p.get('main_text') or {}
+        for i,b in enumerate(p.get('blocks',[])):
+            if b['id']!=t['id'] and ids&set(b['members']):
+                rest=[m for m in b['members'] if m not in ids]
+                live=[runs[m]['box_px'] for m in rest if m in runs]
+                p['blocks'][i]=dict(b,members=rest,**({'box_px':hull(live)} if live else {}))
+        p.setdefault('_copy_table_content',[]).extend(sorted(ids))
+        p.setdefault('copy_table_frames',[]).append(dict(id=t['id'],frame=reach,members=sorted(ids),
+            why='TE1: header matter under the top drawn mark, above the first printed line'))
+
+
+def table_drawn_growth(p, body):
+    """Round 7 rule TE8 (lane r7-edges, send-back item 3): every word inside the table's drawn area is printed in
+    the table. The drawn area of an upright table part is the reach of its rules and fills joined to it: marks
+    within its width that touch the part, chained down while the next mark starts within two body ems of the
+    last. Runs inside that reach which the part did not take join it when they stand as the table's own lines
+    under the part in the table's columns
+    (each run starting at a column start, a left edge shared by two or more of its runs, or up to two ems inside
+    one), each line one table line pitch under the line above, or opening a new row of two or more cells whose first
+    cell stands at a column start. Taken-in runs leave any body block that held
+    them. A body-look row (TE6), a table label, another float's run or a line off the column starts inside the
+    reach: the part stays as it was and the place is a doubt (TE10). Turned parts are left as they are."""
+    runs={e['id']:e for e in p['elements'] if e['kind']=='text'}
+    furniture=table_furniture(p)
+    columns=(p.get('main_text') or {}).get('columns',[])
+    for t in list(p.get('tables',[])):
+        if round(t.get('angle',0))%360:continue
+        f=next((f for f in p.get('floats',[]) if t['id'] in f['blocks']
+                and re.match(r'^Table\s+'+TABLE_NUMBER+r'\b',label_fix(f.get('caption','')),re.I)),None)
+        if not f:continue
+        rs=[runs[m] for m in t['members'] if m in runs and m not in furniture and not round(runs[m].get('angle',0))%360]
+        if len(rs)<6:continue
+        tb=hull(e['box_px'] for e in rs)
+        marks=sorted((e['box_px'] for e in p['elements'] if e['kind'] in ('rule','fill')
+                      and (e['kind']=='fill' or e['box_px'][3]-e['box_px'][1]<.3*body)
+                      and x_overlap(e['box_px'],tb)>.8 and e['box_px'][2]-e['box_px'][0]>=.5*(tb[2]-tb[0])
+                      and e['box_px'][3]>=tb[1]-2*body),key=lambda b:b[1])
+        chain=[b for b in marks if b[1]<=tb[3]+.5*body]
+        if not chain:continue
+        bottom=max(b[3] for b in chain)
+        for b in marks:
+            if b[1]<=bottom+2*body and b[1]>tb[3]+.5*body:bottom=max(bottom,b[3])
+        reach=[min(b[0] for b in chain+[tb]),tb[1],max(b[2] for b in chain+[tb]),bottom]
+        if reach[3]<=tb[3]+.5*body and reach[2]<=tb[2]+body:continue
+        cap={m for bid in f['blocks'] for b in p.get('blocks',[]) if b['id']==bid and b['id']!=t['id'] for m in b['members']}|set(f.get('_caption_ids',[]))
+        foreign={m for g in p.get('floats',[]) if g is not f for bid in g['blocks']
+                 for b in p.get('blocks',[])+p.get('tables',[]) if b['id']==bid for m in b['members']}
+        owned={m for g in p.get('floats',[]) for bid in g['blocks'] for b in p.get('blocks',[])+p.get('tables',[])
+               if b['id']==bid for m in b['members']}   # runs a float already holds print with it
+        # runs inside the part's own box, its region or its float's frame are left to the table assembly
+        held=[t['box_px']]+([t['_copy_region']] if t.get('_copy_region') else [])+([f['box_px']] if f.get('box_px') else [])
+        within=lambda e:any(h[0]-1<=e['box_px'][0] and e['box_px'][2]<=h[2]+1 and h[1]-1<=e['box_px'][1] and e['box_px'][3]<=h[3]+1 for h in held)
+        cand=[e for m,e in runs.items() if m not in t['members'] and m not in furniture and m not in cap and m not in owned and not within(e) and e['text'].strip()
+              and not round(e.get('angle',0))%360 and reach[0]-1<=e['box_px'][0] and e['box_px'][2]<=reach[2]+1
+              and reach[1]<=(e['box_px'][1]+e['box_px'][3])/2<=reach[3]]
+        if not cand:continue
+        tracks=[]
+        for x in sorted(e['box_px'][0] for e in rs):
+            if tracks and x-tracks[-1][0]<.5*body:tracks[-1][1]+=1
+            else:tracks.append([x,1])
+        starts=[x for x,n in tracks if n>=2];tracks=[x for x,n in tracks]
+        on_start=lambda e:any(abs(e['box_px'][0]-x)<.5*body for x in starts)
+        in_cell=lambda e:any(-.5*body<=e['box_px'][0]-x<=2*body for x in tracks)   # a wrapped line, hanging or flush
+        rows=text_rows(rs)
+        cy=lambda b:(b[1]+b[3])/2
+        steps=[cy(hull(x['box_px'] for x in b))-cy(hull(x['box_px'] for x in a)) for a,b in zip(rows,rows[1:])]
+        pitch=statistics.median([d for d in steps if .5*body<d<2*body] or [body])   # the table's line pitch
+        member_rows=[cy(hull(x['box_px'] for x in r)) for r in rows]
+        ok=True;taken=[];prev=member_rows[-1]
+        for row in text_rows(cand):
+            b=hull(e['box_px'] for e in row)
+            beside=any(abs(cy(b)-y)<.35*body for y in member_rows)
+            below=b[1]>=tb[3]-.2*body
+            if any(e['id'] in foreign or TABLE_LABEL.match(e['text']) for e in row) or any(
+                    body_look_row(row,p,body,c) for c in columns if c[0]-body<=b[0]<=c[1]):
+                ok=False;break
+            if beside:continue   # a column beside printed lines: left to the table assembly (the last column of a turned page is not read here)
+            step=cy(b)-prev
+            at_pitch=abs(step-pitch)<=.2*pitch and all(in_cell(e) for e in row)
+            new_row=step>0 and len(row)>=2 and on_start(row[0]) and all(in_cell(e) for e in row)
+            if not below or not (at_pitch or new_row):ok=False;break
+            taken.extend(row);prev=cy(b)
+        if not ok:
+            edges_doubt(p['page'],reach,'table_area_growth_marks_disagree');continue
+        if not taken:continue
+        ids={e['id'] for e in taken}
+        new=dict(t,members=list(t['members'])+[e['id'] for e in taken],box_px=hull([t['box_px']]+[e['box_px'] for e in taken]))
+        if t.get('_copy_region'):new['_copy_region']=hull([t['_copy_region'],reach])
+        p['tables'][p['tables'].index(t)]=new
+        for i,b in enumerate(p.get('blocks',[])):
+            if b['id']!=t['id'] and ids&set(b['members']):
+                rest=[m for m in b['members'] if m not in ids]
+                live=[runs[m]['box_px'] for m in rest if m in runs]
+                p['blocks'][i]=dict(b,members=rest,**({'box_px':hull(live)} if live else {}))
+        p.setdefault('_copy_table_content',[]).extend(sorted(ids))
+        p.setdefault('copy_table_frames',[]).append(dict(id=t['id'],frame=reach,members=sorted(ids),
+            why='TE8: lines inside the reach of the drawn rules at the table rows and column starts'))
+
+
+def table_gutter_bound(p, body):
+    """Round 7 rule TE5 (lane r7-edges): a table whose drawn rules stay inside one page column stops at the gutter.
+
+    On a page of two or more columns, when every long rule and fill of an upright table part lies inside one page
+    column, and the part holds, wholly inside another page column at the table's height, at least two rows with
+    the body's look (TE6) one body line pitch apart, the runs of the part in that other column are body text and
+    return to the column stream. Where such a run is a label with values or lies inside the table's drawn
+    structure, the marks disagree: the part stays as it was and the place goes on the doubt list (TE10)."""
+    columns=(p.get('main_text') or {}).get('columns',[])
+    if len(columns)<2:return
+    runs={e['id']:e for e in p['elements'] if e['kind']=='text'}
+    furniture=table_furniture(p)
+    for t in list(p.get('tables',[])):
+        if round(t.get('angle',0))%360:continue
+        if not any(t['id'] in f['blocks'] and re.match(r'^Table\s+'+TABLE_NUMBER+r'\b',label_fix(f.get('caption','')),re.I)
+                   for f in p.get('floats',[])):continue
+        rs=[runs[m] for m in t['members'] if m in runs and m not in furniture and not round(runs[m].get('angle',0))%360]
+        if len(rs)<6:continue
+        tb=hull(e['box_px'] for e in rs)
+        marks=[e['box_px'] for e in p['elements'] if e['kind'] in ('rule','fill') and e['box_px'][2]-e['box_px'][0]>=4*body
+               and (e['kind']=='fill' or e['box_px'][3]-e['box_px'][1]<.3*body)
+               and e['box_px'][1]<tb[3]+body and e['box_px'][3]>tb[1]-2*body and x_overlap(e['box_px'],tb)>.5]
+        if len(marks)<2:continue
+        reach=hull(marks)
+        columns=prose_page_columns(p,[e for e in rs if reach[0]-body<=e['box_px'][0] and e['box_px'][2]<=reach[2]+body],body)
+        if len(columns)<2:continue
+        home=[c for c in columns if all(c[0]-body<=b[0] and b[2]<=c[1]+body for b in marks)]
+        if len(home)!=1:continue
+        home=home[0];top=min(b[1] for b in marks)-2*body;bottom=max(b[3] for b in marks)+2*body
+        released=[];places=[]
+        for left,right in columns:
+            if (left,right)==home:continue
+            mine=[e for e in rs if left-body<=e['box_px'][0] and e['box_px'][2]<=right+body]
+            if not mine:continue
+            # the body look is read on the page's rows of that column at the table's height, members or not
+            page_rows=text_rows([e for e in p['elements'] if e['kind']=='text' and not round(e.get('angle',0))%360
+                                 and left-body<=e['box_px'][0] and e['box_px'][2]<=right+body and top<=e['box_px'][1]<=bottom])
+            look=[r for r in page_rows if body_look_row(r,p,body,(left,right))]
+            cy=[(hull(e['box_px'] for e in r)[1]+hull(e['box_px'] for e in r)[3])/2 for r in look]
+            if not any(1.0*body<=b2-a<=1.6*body for a,b2 in zip(cy,cy[1:])):continue
+            released.extend(mine);places.append(hull(e['box_px'] for e in mine))
+        if not released:continue
+        ids={e['id'] for e in released}
+        kept=[e for e in rs if e['id'] not in ids]
+        if len(text_rows(kept))<2:continue
+        kb=hull(e['box_px'] for e in kept)
+        extents=table_ruled_extents(p,kb,body)
+        def inside(e):
+            cx,cy=(e['box_px'][0]+e['box_px'][2])/2,(e['box_px'][1]+e['box_px'][3])/2
+            return any(g[0]<=cx<=g[2] and g[1]<=cy<=g[3] for g in extents)
+        if any(label_values_line(e['text']) or inside(e) for e in released):
+            for b in places:edges_doubt(p['page'],b,'table_gutter_marks_disagree')
+            continue
+        members=[m for m in t['members'] if m not in ids]
+        new=dict(t,members=members,box_px=hull(runs[m]['box_px'] for m in members if m in runs))
+        if t.get('_copy_region'):new['_copy_region']=[max(t['_copy_region'][0],home[0]-body),t['_copy_region'][1],min(t['_copy_region'][2],home[1]+body),t['_copy_region'][3]]
+        p['tables'][p['tables'].index(t)]=new
+        p.setdefault('copy_table_frames',[]).append(dict(id=t['id'],frame=new['box_px'],members=sorted(ids),
+            why='TE5: the rules stay in one page column; body-look rows in another column are body text'))
+        # whole rows the part held return as blocks; pieces of rows whose other runs are body text are left to the
+        # body reading, which reads a main-text run into its paragraph by position
+        member=set(t['members'])
+        def whole(row):
+            col=next(((l,r) for l,r in columns if l-body<=row[0]['box_px'][0]<=r),None)
+            cy=(row[0]['box_px'][1]+row[0]['box_px'][3])/2
+            line=[x for x in p['elements'] if x['kind']=='text' and not round(x.get('angle',0))%360 and col
+                  and col[0]-body<=x['box_px'][0] and x['box_px'][2]<=col[1]+body and abs((x['box_px'][1]+x['box_px'][3])/2-cy)<.35*body]
+            return all(x['id'] in member for x in line)
+        whole_rows=[e for row in text_rows(released) if whole(row) for e in row]
+        release_body_rows(p,t,whole_rows,body)
+
+
+# ---------------------------------------------------------------- round 8, lane r8-turned: turned tables
+# The user's rule (2026-11-16): a table set sideways needs no special rules. In a PDF with a text layer the turn is a
+# quarter turn and the file records the direction of every line of text; a page whose text is mostly turned is a
+# turned page. The positions are turned upright by arithmetic (frame(), exact), then every table rule applies unchanged.
+_R8_VIEW_BACK = [None]   # while a rule runs in a turned view: its frame -> the page (for the places of the doubt list)
+R8_VIEW_BOX_LISTS = ('tables', 'blocks', 'floats', 'copy_table_frames', '_figure_regions')
+
+
+def r8_turned_angles(p):
+    """the turns at which the page's turned matter is read: the angle of every turned table part, and the page's turn
+    where most of its text is turned (turned_page_angle), as the file records them"""
+    angles = {round(t.get('angle', 0)) % 360 for t in p.get('tables', [])} - {0}
+    a = turned_page_angle(p)
+    if a: angles.add(round(a) % 360)
+    return sorted(a for a in angles if a in (90, 180, 270))
+
+
+def r8_turned_view(p, angle):
+    """One upright frame for a turned table part (lane r8-turned): a view of the page in which every position is turned
+    by the same quarter turn, read from the direction the file records: the words, the drawn rules, fills and outlines,
+    the blocks, the table parts, the floats and their regions. Each text run keeps its own direction relative to the
+    turn, so the turned lines read upright (angle 0) and upright leftovers on the page (a running head, a page number,
+    an upright caption) stand at a turn in the view: the rules, which read upright text only, leave them in their own
+    frame. Positions of single characters are not carried (the rules read runs; text is made from the runs' own text).
+    The page's columns of body prose are those of the upright page and are not columns in the turned frame: the view
+    has none. -> (view, snapshot of the box lists, the map back)"""
+    import copy as _copy
+    fr = frame(angle)
+    tb = lambda b: list(fr(b))
+    def turn(x):
+        y = dict(x)
+        for k in ('box_px', '_copy_region'):
+            if isinstance(y.get(k), (list, tuple)) and len(y[k]) == 4: y[k] = tb(y[k])
+        if 'frame' in y and isinstance(y['frame'], (list, tuple)) and len(y['frame']) == 4: y['frame'] = tb(y['frame'])
+        if 'angle' in y and isinstance(y['angle'], (int, float)): y['angle'] = y['angle'] - angle
+        return y
+    v = dict(p)
+    els = []
+    for e in p['elements']:
+        x = turn(e)
+        if e['kind'] == 'text' and 'angle' not in e: x['angle'] = -angle
+        for k in ('_chars', 'char_ids', '_subscript_sources'): x.pop(k, None)
+        els.append(x)
+    v['elements'] = els
+    if p.get('art'): v['art'] = [turn(e) for e in p['art']]
+    mt = dict(p.get('main_text') or {})
+    mt['columns'] = []
+    mt['blocks'] = [turn(b) for b in mt.get('blocks', [])]
+    v['main_text'] = mt
+    v['_copy_front'] = [tb(b) for b in p.get('_copy_front') or []]
+    origin = {}
+    for k in R8_VIEW_BOX_LISTS:
+        if k not in p: continue
+        if k == '_figure_regions': v[k] = [tb(b) for b in p[k]]; continue
+        v[k] = []
+        for x in p[k]:
+            y = turn(x); origin[id(y)] = (x, _copy.deepcopy(y)); v[k].append(y)
+    for k, val in p.items():
+        if k not in v or v[k] is val:
+            if isinstance(val, list) and k not in ('elements',): v[k] = list(val)
+    return v, origin
+
+
+def r8_turned_back(p, v, angle, origin):
+    """lane r8-turned: what a rule changed in the turned view goes back to the page, turned back by the same turn;
+    what it left unchanged keeps the page's own object"""
+    back = frame_box_back(angle)
+    def unturn(y):
+        if id(y) in origin and origin[id(y)][1] == y: return origin[id(y)][0]
+        x = dict(y)
+        for k in ('box_px', '_copy_region'):
+            if isinstance(x.get(k), (list, tuple)) and len(x[k]) == 4: x[k] = back(x[k])
+        if 'frame' in x and isinstance(x['frame'], (list, tuple)) and len(x['frame']) == 4: x['frame'] = back(x['frame'])
+        if 'angle' in x and isinstance(x['angle'], (int, float)): x['angle'] = (x['angle'] + angle) % 360
+        return x
+    for k, val in v.items():
+        if k in ('elements', 'art', 'main_text', '_copy_front'): continue
+        if k in R8_VIEW_BOX_LISTS:
+            new = [back(b) for b in val] if k == '_figure_regions' else [unturn(y) for y in val]
+            if k not in p or len(new) != len(p[k]) or any(a is not b for a, b in zip(new, p[k])): p[k] = new
+        elif k not in p or (val is not p[k] and val != p[k]):
+            p[k] = val
+
+
+def r8_turned_rule(p, body, rule):
+    """lane r8-turned: the rule on the page's turned matter, one turn at a time, in its upright frame (r8_turned_view);
+    the places it lists go to the doubt list as boxes of the page"""
+    for angle in r8_turned_angles(p):
+        # TF7 with the box of step 2 takes a label BASE prints as body. On a turned float page (most text at this
+        # turn) BASE gives the page's turned table label to the turned float after all readings (F18, lane r5-turned):
+        # it is never printed as body, so the rule has no label there (AS22 p9, AV16 p7: it took the caption of a
+        # grid BASE prints right and made it a line list)
+        if rule is r8_labelled_part and angle == turned_page_angle(p): continue
+        v, origin = r8_turned_view(p, angle)
+        before = [list(map(id, p.get(k, []))) for k in ('tables', 'blocks', 'floats')]
+        doubts = len(doubt_list().items())
+        _R8_VIEW_BACK[0] = frame_box_back(angle)
+        try: rule(v, body)
+        finally: _R8_VIEW_BACK[0] = None
+        r8_turned_back(p, v, angle, origin)
+        if rule is r8_wide_label_caption:   # the parts captioned in the turned frame (checked again at the gate)
+            for f in p.get('floats', []):
+                if id(f) not in before[2] and f.get('_r8_keep_place'): f['_r8_turned_caption'] = True
+        # the run log says where a rule spoke on turned matter (the copy's files are not changed by this note)
+        changed = [k for k, b in zip(('tables', 'blocks', 'floats'), before) if list(map(id, p.get(k, []))) != b]
+        if changed or len(doubt_list().items()) != doubts:
+            print('r8-turned: page %s angle %d rule %s changed %s doubts +%d' % (p.get('page'), angle, rule.__name__, '+'.join(changed) or '-',
+                                                                              len(doubt_list().items()) - doubts), file=sys.stderr)
+
+
+# ---------------------------------------------------------------- round 8, lane r8-box: finding and boxing a table
+# The user's rules TF1 to TF8 and TK1, TK2, TK6 to TK9 (round7/RULES-TF.md), steps 1 and 2 of the order of
+# 2026-11-16: find the table by its label and the checks, box it by the label, the block of lines unlike the paper's
+# normal column and the drawn frame. Where the marks do not agree with each other, BASE's reading stays and the place
+# goes on the doubt list (rule 'TK9').
+R8_NUM = r'(?:[A-Z]?\d+[A-Za-z]?|[IVXL]+|S\d+)'
+R8_LABEL = re.compile(r'^\s*(?P<pre>(?:Appendix|APPENDIX|Supplementa\w*|SUPPLEMENTA\w*|Online|ONLINE|e)\s*)?'
+                      r'(?P<word>Tables?|TABLES?|T\s?A\s?B\s?L\s?E\s?S?)\s*(?P<num>' + R8_NUM + r')(?![A-Za-z0-9])'
+                      r'(?:\s*(?:and|&|,|–|-)\s*' + R8_NUM + r'(?![A-Za-z0-9]))?(?P<rest>.*)$')
+R8_ANY_LABEL = re.compile(r'^\s*(?:(?:Appendix|Supplementa\w*|Online|e)\s*)?(?:Tables?|TABLES?|T\s?A\s?B\s?L\s?E\s?S?|'
+                          r'Fig\.?|Figure|FIGURE|FIG\.?|F\s?I\s?G\s?U\s?R\s?E|Scheme|Box|Chart)\s*(?:' + R8_NUM + r')\b')
+
+
+def r8_label_line(text):
+    """TF7 and TF8, the wide label list: the joined text of a printed line opens with a table label in caption form
+    (a word before the label word, spaced capitals, a plural label, a continuation word). The label stands alone, or is
+    followed by a separator, a bracket or a capitalised title; a lower-case word after the number is a sentence
+    ('Table 1 shows'), not a caption. -> the match or None"""
+    m = R8_LABEL.match(text or '')
+    if not m:
+        return None
+    rest = m.group('rest')
+    if rest.strip() and not re.match(r'^\s*(?:[.:–—|\-]|\(|\[|[A-Z]|contin|cont[.’\'])', rest):
+        return None
+    return m
+
+
+def r8_paper_normal(pages):
+    """TF1: the normal column comes from the whole paper, not from one page. The body type is read from the paper's
+    running prose: the body blocks of four or more lines that page reading orders before the reference list, over all
+    pages; the size that carries most of their lines, refined to the run size carrying most letters within 5 % of it
+    (tables, references and notes, however many letters they hold, are not the normal column). The face is the
+    paper's body face. The line pitch is the median step between lines of that size one under the other in a page
+    column. Stored on every page as p['_r8_normal']."""
+    face = pages[0].get('_body_face', '') if pages else ''
+    lines = collections.Counter()
+    prose = []
+    for p in pages:
+        if (p.get('scan_evidence') or {}).get('ocr_layer'):
+            continue
+        runs = {e['id']: e for e in p['elements'] if e['kind'] == 'text'}
+        members = {b['id']: b.get('members', []) for b in p.get('blocks', [])}
+        stop = False
+        for b in sorted((b for b in (p.get('main_text') or {}).get('blocks', []) if b.get('order') is not None), key=lambda b: b['order']):
+            if REF_HEAD.match(b.get('text', '')):
+                stop = True
+                break
+            if b.get('lines', 0) >= 4 and b.get('cls', 'main') == 'main':
+                lines[round(b.get('size_px', 0), 1)] += b['lines']
+                prose.extend(runs[m] for m in members.get(b['id'], []) if m in runs and not round(runs[m].get('angle', 0)) % 360)
+        if stop:
+            break
+    size = None
+    if lines:
+        guess = lines.most_common(1)[0][0]
+        letters = collections.Counter()
+        for e in prose:
+            if abs(e.get('run_size_px', 0) - guess) <= .05 * guess:
+                letters[round(e.get('run_size_px', 0), 1)] += sum(c.isalpha() for c in e['text'])
+        size = letters.most_common(1)[0][0] if letters else guess
+    steps = []
+    if size:
+        for p in pages:
+            for left, right in (p.get('main_text') or {}).get('columns', []):
+                ys = sorted((e['box_px'][1] + e['box_px'][3]) / 2 for e in p['elements'] if e['kind'] == 'text'
+                            and not round(e.get('angle', 0)) % 360 and abs(e.get('run_size_px', 0) - size) <= .05 * size
+                            and left - size <= e['box_px'][0] and e['box_px'][2] <= right + size)
+                steps += [b - a for a, b in zip(ys, ys[1:]) if 1.0 * size <= b - a <= 2.0 * size]
+    normal = dict(size=size, face=face, pitch=statistics.median(steps) if steps else (1.2 * size if size else None))
+    for p in pages:
+        p['_r8_normal'] = normal
+    return normal
+
+
+def r8_family(face):
+    """a face's family: the face name less its style ending (Bold, Italic, Medium, ...), so that bold or italic words
+    of running prose keep the body look"""
+    return re.sub(r'(?:[-,]?(?:Bold|Italic|Oblique|Semibold|SemiBold|Medium|Light|Regular|Roman|Book|Black|Heavy|Demi|It|Bd|BI|B|I)\b)+$|[-,](?:Bold|Italic|Oblique|BoldItalic|BoldOblique|Semibold|Medium|Light|Regular|Roman|It|Bd|BdIt|BI|B|I)\w*$', '', face or '')
+
+
+def r8_columns(p):
+    """the page's text columns at least twelve normal ems wide (the paper's own columns for that part of the paper)"""
+    size = (p.get('_r8_normal') or {}).get('size') or 0
+    return [(l, r) for l, r in (p.get('main_text') or {}).get('columns', []) if r - l >= 12 * size]
+
+
+def r8_body_look(row, p, column):
+    """TF1 and TK2: a printed row of one page column with the normal column's look: every run in the paper's body size
+    (within 5 %), mostly in its body face where faces are known, five words or more, starting on the column's left
+    edge or at a first-line indent (up to two ems) and filling most of the column."""
+    nm = p.get('_r8_normal') or {}
+    size = nm.get('size')
+    if not size or not row or any(round(e.get('angle', 0)) % 360 for e in row):
+        return False
+    if not all(.95 * size <= e.get('run_size_px', 0) <= 1.05 * size for e in row):
+        return False
+    counts = collections.Counter()
+    for e in row:
+        counts.update({r8_family(k): v for k, v in (e.get('_faces') or {}).items()})
+    if nm.get('face') and counts and counts.get(r8_family(nm['face']), 0) < .8 * sum(counts.values()):
+        return False
+    if len(' '.join(e['text'] for e in row).split()) < 5:
+        return False
+    left, right = column
+    b = hull(e['box_px'] for e in row)
+    return -.5 * size <= b[0] - left <= 2 * size and b[2] - b[0] >= .6 * (right - left) and b[2] <= right + size
+
+
+def r8_prose_column(rows, p):
+    """TK2 (and TK1): a column of the area that is itself a normal column of the paper filled with running prose:
+    three or more of the area's rows in one page column, one after the other, each with the body look (r8_body_look),
+    at the regular step of running prose (each step one to two body sizes, the two steps within 15 % of each other;
+    a page set wider or closer than the paper's other pages keeps its prose). -> the box of those rows, or None"""
+    nm = p.get('_r8_normal') or {}
+    size = nm.get('size')
+    if not size:
+        return None
+    for column in r8_columns(p):
+        mine = [r for r in rows if column[0] - size <= hull(e['box_px'] for e in r)[0] <= column[1]]
+        mine = [[e for e in r if column[0] - size <= e['box_px'][0] and e['box_px'][2] <= column[1] + size] for r in mine]
+        stretch = []
+        for r in mine:
+            if not r or not r8_body_look(r, p, column):
+                stretch = []
+                continue
+            cy = (hull(e['box_px'] for e in r)[1] + hull(e['box_px'] for e in r)[3]) / 2
+            if stretch and not size <= cy - stretch[-1][0] <= 2 * size:
+                stretch = []
+            stretch.append((cy, r))
+            if len(stretch) >= 3:
+                a, b = stretch[-2][0] - stretch[-3][0], stretch[-1][0] - stretch[-2][0]
+                if abs(a - b) <= .15 * max(a, b):
+                    return hull(e['box_px'] for _, rr in stretch[-3:] for e in rr)
+    return None
+
+
+def r8_doubt(page, box, reason):
+    """TK9: one doubt-list entry per place (a page can be read twice)."""
+    if _R8_VIEW_BACK[0]: box = _R8_VIEW_BACK[0](box)   # lane r8-turned: a place found in a turned part's frame
+    box = [round(float(v), 1) for v in box]
+    if any(d['rule'] == 'TK9' and d['page'] == page and d['box'] == box and d['reason'] == reason for d in doubt_list().items()):
+        return
+    doubt_list().add('TK9', page, box, reason)
+
+
+def r8_label_pieces(p, runs):
+    """The pieces of the page's printed lines (cut at white wider than two and a half ems) that open with a wide-list
+    table label (r8_label_line): [(piece runs, match)]"""
+    size = (p.get('_r8_normal') or {}).get('size') or 16
+    out = []
+    for row in text_rows([e for e in runs if e['text'].strip() and not round(e.get('angle', 0)) % 360]):
+        piece = []
+        for e in row:
+            if piece and e['box_px'][0] - piece[-1]['box_px'][2] > 2.5 * size:
+                out.append(piece)
+                piece = []
+            piece.append(e)
+        out.append(piece)
+    return [(pc, m) for pc in out if (m := r8_label_line(' '.join(e['text'] for e in pc)))]
+
+
+def r8_unlabelled_not_table(p, body):
+    """Step 1, rule TK9 without a label: an area BASE holds as a table that has no table label and fails a check is not
+    a table. It is printed as BASE prints such matter elsewhere: its runs return to the page's column stream
+    (release_table_runs) and the place goes on the doubt list.
+
+    The area is an upright table part that no float holds (no caption, no figure). 'No label': no line opening with a
+    table or figure label (wide list) stands inside it, or within four normal lines above or below it across its width,
+    and the page before holds no table (a part that runs on from the page before is anchored by TF8, not judged here).
+    The checks read here are counts on the page: TK2 (a column of the area is a normal column of the paper filled with
+    running prose, r8_prose_column) and TK8 (half or more of the area's runs lie in the front-page blocks the program
+    already knows: title, authors, affiliations)."""
+    nm = p.get('_r8_normal') or {}
+    size = nm.get('size')
+    if not size or p.get('_r8_prev_table'):
+        return
+    runs = {e['id']: e for e in p['elements'] if e['kind'] == 'text'}
+    furniture = table_furniture(p)
+    held = {bid for f in p.get('floats', []) for bid in f.get('blocks', [])}
+    for t in list(p.get('tables', [])):
+        if t['id'] in held or round(t.get('angle', 0)) % 360:
+            continue
+        rs = [runs[m] for m in t['members'] if m in runs and m not in furniture and runs[m]['text'].strip()
+              and not round(runs[m].get('angle', 0)) % 360]
+        if len(rs) < 6:
+            continue
+        tb = hull(e['box_px'] for e in rs)
+        near = [tb[0], tb[1] - 4 * size, tb[2], tb[3] + 4 * size]
+        if any(R8_ANY_LABEL.match(' '.join(e['text'] for e in row)) for row in text_rows(
+                [e for e in runs.values() if e['text'].strip() and not round(e.get('angle', 0)) % 360
+                 and near[1] <= (e['box_px'][1] + e['box_px'][3]) / 2 <= near[3]
+                 and min(e['box_px'][2], near[2]) > max(e['box_px'][0], near[0])])):
+            continue
+        fails = []
+        if r8_prose_column(text_rows(rs), p):
+            fails.append('TK2')
+        front = p.get('_copy_front') or []
+        if front and sum(any(b[0] - 1 <= (e['box_px'][0] + e['box_px'][2]) / 2 <= b[2] + 1 and
+                             b[1] - 1 <= (e['box_px'][1] + e['box_px'][3]) / 2 <= b[3] + 1 for b in front) for e in rs) >= .5 * len(rs):
+            fails.append('TK8')
+        if not fails:
+            continue
+        p['tables'] = [x for x in p['tables'] if x is not t]
+        p.setdefault('copy_released_seeds', []).append(dict(id=t['id'], runs=len(rs), why='TK9: no table label, fails ' + '+'.join(fails)))
+        release_table_runs(p, t, rs, body)
+        r8_doubt(p['page'], tb, 'unlabelled_area_not_table:' + '+'.join(fails))
+
+
+def r8_labelled_part(p, body):
+    """Step 1 (TF7) with the box of step 2: a table label that BASE prints as body text, with a block of cells next to
+    it, becomes that table's part.
+
+    The label: a printed line opening with a wide-list table label (r8_label_line), standing at the start of its text
+    block (the line above in its column, if any, ends a sentence or lies more than one and a half normal lines
+    above), which no float or table holds and which BASE prints as body (a member of an ordered body block; on a page
+    with no column of body width, which is then read as one column, a member of any text block). No table
+    part of the page lies under it within eight normal lines.
+    The box: the label and its caption block (the lines directly under it at the caption's own spacing, its size and
+    left edge, with no wide gaps), then every whole printed line below it that lacks the normal column's look, across
+    the page's columns unless the other column holds body-look lines at the label's height (then the label's column
+    only), until a wall: a body-look line, page furniture, another float's label, a run another float or part holds.
+    A part that no float holds, starting directly under the block, is the same table and is taken in whole.
+    It becomes a part only where the marks agree: six or more rows; two or more column starts (left edges shared by
+    three or more rows, two ems apart; TF4); no row with the body look inside (TK2); half or more of its rows below
+    the normal size or broken into two or more groups (TK1). Where the label is found but these do not hold, BASE
+    stays and the place goes on the doubt list. The part is printed in the program's flagged form for a table whose
+    structure is not recovered (printed lines kept, left to right, top to bottom)."""
+    nm = p.get('_r8_normal') or {}
+    size, pitch = nm.get('size'), nm.get('pitch')
+    if not size or not pitch:
+        return
+    runs = {e['id']: e for e in p['elements'] if e['kind'] == 'text'}
+    up = [e for e in runs.values() if e['text'].strip() and not round(e.get('angle', 0)) % 360]
+    furniture = table_furniture(p) | set(p.get('_front_furniture_run_ids', []))
+    blocks = {b['id']: b for b in p.get('blocks', [])}
+    held = set()
+    for f in p.get('floats', []):
+        held |= set(f.get('_caption_ids', [])) | set(f.get('_line_fallback_ids', []))
+        for bid in f.get('blocks', []):
+            held |= set((blocks.get(bid) or {}).get('members', []))
+    for t in p.get('tables', []):
+        held |= set(t.get('members', []))
+    ordered = {b['id'] for b in (p.get('main_text') or {}).get('blocks', []) if b.get('order') is not None}
+    columns = r8_columns(p)
+    # printed as body; on a page with no column of body width (a page the table fills), printed as side text too
+    body_ids = {m for b in p.get('blocks', []) if b['id'] in ordered or not columns for m in b.get('members', [])}
+    columns = columns or ([(min(e['box_px'][0] for e in up), max(e['box_px'][2] for e in up))] if up else [])
+    labels = [(pc, m) for pc, m in r8_label_pieces(p, up)]
+    other_labels = [hull(e['box_px'] for e in row) for row in text_rows(up) if R8_ANY_LABEL.match(' '.join(e['text'] for e in row))]
+    for piece, match in labels:
+        if any(e['id'] in held or e['id'] in furniture for e in piece) or not all(e['id'] in body_ids for e in piece):
+            continue
+        lb = hull(e['box_px'] for e in piece)
+        col = next(((l, r) for l, r in columns if l - size <= lb[0] <= r), None)
+        if col is None:
+            continue
+        # the label opens its text block
+        above = [e for e in up if col[0] - size <= e['box_px'][0] <= col[1] and e['box_px'][3] <= lb[1] + .2 * size
+                 and e['id'] not in furniture and lb[1] - e['box_px'][3] < 1.5 * pitch]
+        if above:
+            last = max(text_rows(above), key=lambda r: hull(e['box_px'] for e in r)[3])
+            if not re.search(r'[.!?:]["”’)]?\s*$', ' '.join(e['text'] for e in last)):
+                continue
+        if any(t.get('box_px') and not round(t.get('angle', 0)) % 360 and 0 <= t['box_px'][1] - lb[3] <= 8 * pitch
+               and min(t['box_px'][2], col[1]) > max(t['box_px'][0], col[0]) for t in p.get('tables', [])):
+            continue
+        lsize = statistics.median(e.get('run_size_px', size) for e in piece)
+        rows = [r for r in text_rows([e for e in up if (e['box_px'][1] + e['box_px'][3]) / 2 > lb[3]])]
+        # the caption block
+        cap = list(piece)
+        last, step0, k = lb, None, 0
+        while k < len(rows):
+            r = rows[k]
+            b = hull(e['box_px'] for e in r)
+            step = (b[1] + b[3]) / 2 - (last[1] + last[3]) / 2
+            gaps = [y['box_px'][0] - x['box_px'][2] for x, y in zip(r, r[1:])]
+            if (abs(b[0] - lb[0]) > size or any(abs(e.get('run_size_px', 0) - lsize) > .6 * 110 / 72 for e in r)
+                    or any(g > 1.5 * size for g in gaps) or step > (1.6 * step0 if step0 else 1.5 * lsize)
+                    or any(e['id'] in furniture for e in r) or R8_ANY_LABEL.match(' '.join(e['text'] for e in r))):
+                break
+            step0 = step0 or step
+            cap.extend(r)
+            last = b
+            k += 1
+        cb = hull(e['box_px'] for e in cap)
+        # the horizontal extent: the label's column when the other columns hold body-look lines at its height
+        bounded = any(r8_body_look([e for e in r if c[0] - size <= e['box_px'][0] and e['box_px'][2] <= c[1] + size], p, c)
+                      for c in columns if c != col for r in text_rows([e for e in up if abs((e['box_px'][1] + e['box_px'][3]) / 2
+                                                                                          - (cb[3] + 3 * pitch)) <= 3 * pitch]))
+        xr = col if bounded or len(columns) < 2 else (min(c[0] for c in columns), max(c[1] for c in columns))
+        taken, why = [], 'end'
+        for r in rows[k:]:
+            r = [e for e in r if xr[0] - size <= e['box_px'][0] and e['box_px'][2] <= xr[1] + size]
+            if not r:
+                continue
+            b = hull(e['box_px'] for e in r)
+            if any(e['id'] in furniture for e in r):
+                why = 'furniture'
+                break
+            if any(o[1] <= (b[1] + b[3]) / 2 <= o[3] and min(o[2], b[2]) > max(o[0], b[0]) for o in other_labels):
+                why = 'label'
+                break
+            if any(e['id'] in held for e in r):
+                why = 'held'
+                break
+            if any(r8_body_look([e for e in r if c[0] - size <= e['box_px'][0] and e['box_px'][2] <= c[1] + size], p, c)
+                   for c in columns if min(c[1], xr[1]) > max(c[0], xr[0])):
+                why = 'body'
+                break
+            if taken:
+                gap = b[1] - max(e['box_px'][3] for e in taken)
+                if gap > 3 * pitch:
+                    why = 'white'
+                    break
+            taken.extend(r)
+        # a heading set over the body wall (one group, the normal size or larger) is the body's, not the table's
+        while why == 'body' and taken:
+            last_row = text_rows(taken)[-1]
+            if r8_heading_groups(last_row, size) and statistics.median(e.get('run_size_px', 0) for e in last_row) >= .95 * size:
+                taken = [e for e in taken if e not in last_row]
+            else:
+                break
+        # TF7: where the walk meets a part that no float holds, starting directly under the block (within three
+        # normal pitches, sharing its width, upright), the block and that part are one table: the part is taken in
+        joined = []
+        if why == 'held':
+            last = max([e['box_px'][3] for e in taken] or [cb[3]])
+            fl = {bid for f in p.get('floats', []) for bid in f.get('blocks', [])}
+            for t in p.get('tables', []):
+                tb = t.get('box_px')
+                if (t['id'] in fl or round(t.get('angle', 0)) % 360 or not tb or not -size <= tb[1] - last <= 3 * pitch
+                        or min(tb[2], xr[1]) - max(tb[0], xr[0]) < .5 * (tb[2] - tb[0])):
+                    continue
+                joined.append(t)
+        for t in joined:
+            taken.extend(runs[m] for m in t['members'] if m in runs and runs[m] not in taken and runs[m]['text'].strip())
+        place = hull([cb] + [e['box_px'] for e in taken])
+        trows = text_rows(taken)
+        tracks = []
+        for x in sorted(hull(e['box_px'] for e in g)[0] for r in trows for g in r8_groups(r, size)):
+            if tracks and x - tracks[-1][0] < 2 * size:
+                tracks[-1][1] += 1
+            else:
+                tracks.append([x, 1])
+        starts = [x for x, n in tracks if n >= 3]
+        unlike = sum(statistics.median(e.get('run_size_px', 0) for e in r) < .95 * size or len(r8_groups(r, size)) >= 2 for r in trows)
+        if len(trows) < 6 or len(starts) < 2 or unlike < .5 * len(trows) or r8_prose_column(trows, p):
+            r8_doubt(p['page'], place, 'table_label_printed_as_body:marks_disagree')
+            continue
+        ids = [e['id'] for e in taken]
+        cm = [e['id'] for e in cap]
+        tid, bid = 'copy:r8label:' + piece[0]['id'], 'copy:r8caption:' + piece[0]['id']
+        p['tables'] = [x for x in p['tables'] if not any(x is t for t in joined)]
+        p['tables'].append(dict(id=tid, angle=0, members=ids, box_px=hull(e['box_px'] for e in taken), _copy_exact=True,
+                                layout='unstructured'))
+        moved = set(ids) | set(cm)
+        for i, b in enumerate(p.get('blocks', [])):
+            if moved & set(b['members']):
+                rest = [m for m in b['members'] if m not in moved]
+                live = [runs[m]['box_px'] for m in rest if m in runs]
+                p['blocks'][i] = dict(b, members=rest, **({'box_px': hull(live)} if live else {}))
+        p['blocks'].append(dict(id=bid, members=cm, box_px=cb))
+        p['floats'].append(dict(caption=label_fix(' '.join(e['text'] for e in cap)), blocks=[bid, tid], _caption_ids=cm,
+                                box_px=hull([cb, r8_drawn_box(p, place, size)])))
+        p.setdefault('_copy_table_content', []).extend(ids)
+        p.setdefault('copy_table_frames', []).append(dict(id=tid, frame=place, members=sorted(ids),
+                                                          why='TF7: a table label printed as body, with an unlike block of cells under it (wall: %s)' % why))
+        held |= moved
+
+
+def r8_wide_label_caption(p, body):
+    """Step 1 (TF7, the wide label list): a table part BASE prints with no caption, next to which a table label of the
+    wide list stands (a word before the label word, a letter before the number, spaced capitals, a plural label, a
+    continuation word), is that table: the label and its caption block become the part's caption.
+
+    The label piece (r8_label_pieces) stands directly above the part: its caption block ends within three normal line
+    pitches above the part's first printed line, it shares half or more of its own width with the part, no other
+    printed line lies between (header rows of the table excepted), and no float holds it; its caption block is the
+    lines directly under it at its size and left edge that are not broken into groups. Or, for a caption set below its table, directly under the
+    part's last line in the same way, with the part's rows ending above it. The label's run must not be a member of
+    another table part; a label inside the part itself names it only when it is the part's first line. Where two such labels compete for one part, BASE stays and the place goes on the doubt list.
+    A part whose last row is a section heading (one group, or a section number and one group, in the normal size or
+    larger) ran into the body: BASE stays and the place goes on the doubt list."""
+    nm = p.get('_r8_normal') or {}
+    size, pitch = nm.get('size'), nm.get('pitch')
+    if not size or not pitch:
+        return
+    runs = {e['id']: e for e in p['elements'] if e['kind'] == 'text'}
+    up = [e for e in runs.values() if e['text'].strip() and not round(e.get('angle', 0)) % 360]
+    furniture = table_furniture(p)
+    blocks = {b['id']: b for b in p.get('blocks', [])}
+    heldf = set()
+    for f in p.get('floats', []):
+        heldf |= set(f.get('_caption_ids', [])) | set(f.get('_line_fallback_ids', []))
+        for bid in f.get('blocks', []):
+            heldf |= set((blocks.get(bid) or {}).get('members', []))
+    in_float = {bid for f in p.get('floats', []) for bid in f.get('blocks', [])}
+    labels = r8_label_pieces(p, up)
+    for t in list(p.get('tables', [])):
+        if t['id'] in in_float or round(t.get('angle', 0)) % 360:
+            continue
+        rs = [runs[m] for m in t['members'] if m in runs and runs[m]['text'].strip() and m not in furniture]
+        if len(rs) < 4:
+            continue
+        own = set(t['members'])
+        found = []
+        for piece, match in labels:
+            if any(e['id'] in heldf or e['id'] in furniture for e in piece):
+                continue
+            if any(e['id'] in x.get('members', []) for e in piece for x in p['tables'] if x is not t):
+                continue
+            inside = [e for e in piece if e['id'] in own]
+            if inside and (len(inside) < len(piece) or min(e['box_px'][1] for e in piece) > min(e['box_px'][1] for e in rs) + .5 * size):
+                continue   # a label inside the part names it only as the part's first line
+            if inside:
+                # a caption set beside the table: the part's next row holds a group on the label's left edge in the
+                # label's size beside other cells; the marks disagree, BASE stays
+                lb0 = hull(e['box_px'] for e in piece)
+                nxt = [r for r in text_rows([e for e in rs if e not in piece]) if hull(e['box_px'] for e in r)[1] > lb0[1]]
+                g = r8_groups(nxt[0], size) if nxt else []
+                if (len(g) >= 2 and abs(g[0][0]['box_px'][0] - lb0[0]) <= size and
+                        abs(statistics.median(e.get('run_size_px', 0) for e in g[0]) - statistics.median(e.get('run_size_px', 0) for e in piece)) <= .6 * 110 / 72):
+                    r8_doubt(p['page'], hull([lb0, t['box_px']]), 'wide_label_caption:caption_beside_table')
+                    continue
+            lb = hull(e['box_px'] for e in piece)
+            body_rs = [e for e in rs if e['id'] not in {x['id'] for x in piece}]
+            if not body_rs:
+                continue
+            tb = hull(e['box_px'] for e in body_rs)
+            if min(lb[2], tb[2]) - max(lb[0], tb[0]) < .5 * (lb[2] - lb[0]):
+                continue
+            lsize = statistics.median(e.get('run_size_px', size) for e in piece)
+            if lb[1] < tb[1]:   # above: the caption block, then the part
+                cap = list(piece)
+                last = lb
+                xs = (min(lb[0], tb[0]) - size, max(lb[2], tb[2]) + size)   # the caption lies inside the table's width
+                for r in text_rows([e for e in up if e['id'] not in own and lb[3] < (e['box_px'][1] + e['box_px'][3]) / 2 < tb[1]
+                                    and xs[0] <= e['box_px'][0] and e['box_px'][2] <= xs[1]]):
+                    b = hull(e['box_px'] for e in r)
+                    if (b[1] - last[3] > .8 * lsize or abs(b[0] - lb[0]) > 3 * size and b[0] < lb[0] or len(r8_groups(r, size)) >= 2
+                            or any(abs(e.get('run_size_px', 0) - lsize) > .6 * 110 / 72 for e in r)
+                            or any(e['id'] in furniture or e['id'] in heldf for e in r)):
+                        break
+                    cap.extend(r)
+                    last = b
+                cb = hull(e['box_px'] for e in cap)
+                between = [e for e in up if e['id'] not in own and e not in cap and cb[3] < (e['box_px'][1] + e['box_px'][3]) / 2 < tb[1]
+                           and min(e['box_px'][2], tb[2]) > max(e['box_px'][0], tb[0])]
+                # header rows of the table between the caption block and the part (at most four rows inside the part's
+                # width, none with the body look, half or more of them in two or more groups) are table matter
+                hdr = text_rows(between)
+                if (hdr and len(hdr) <= 4 and sum(len(r8_groups(r, size)) >= 2 for r in hdr) >= .5 * len(hdr)
+                        and not any(r8_body_look(r, p, c) for r in hdr for c in r8_columns(p))
+                        and all(tb[0] - size <= e['box_px'][0] and e['box_px'][2] <= tb[2] + 2 * size for e in between)):
+                    between = []
+                    tb = hull([tb] + [e['box_px'] for r in hdr for e in r])
+                if between or not -.5 * size <= tb[1] - cb[3] <= 3 * pitch:
+                    continue
+            else:   # below: the part's rows end above the label
+                cap = list(piece)
+                cb = lb
+                if any(e['box_px'][1] > lb[1] for e in body_rs) or not -.5 * size <= lb[1] - tb[3] <= 3 * pitch:
+                    continue
+                if any(e['id'] not in own and e not in cap and tb[3] < (e['box_px'][1] + e['box_px'][3]) / 2 < lb[1]
+                       and min(e['box_px'][2], tb[2]) > max(e['box_px'][0], tb[0]) for e in up):
+                    continue
+            found.append((cap, cb, bool(inside)))
+        if not found:
+            continue
+        if len(found) > 1:
+            r8_doubt(p['page'], hull([x[1] for x in found]), 'wide_label_caption:two_labels')
+            continue
+        cap, cb, label_inside = found[0]
+        cm = [e['id'] for e in cap]
+        # memo 1: was the label line the page's prose at BASE (a member of an ordered body block)? Then the part,
+        # anchored to no paragraph now, keeps the place it had after that line
+        ordered = {b['id'] for b in (p.get('main_text') or {}).get('blocks', []) if b.get('order') is not None}
+        label_prose = any(cm[0] in b.get('members', []) for b in p.get('blocks', []) if b['id'] in ordered)
+        bid = 'copy:r8caption:' + cm[0]
+        # rows at the part's foot, under its last row of cells, that are one group (or a section number and one group)
+        # set at the normal size or larger, are a section heading the part ran into: the marks disagree (the table
+        # assembly would take the heading back as a table line), so BASE stays and the place is listed
+        prows = text_rows([e for e in rs if e['id'] not in cm])
+        if len(prows) > 3 and r8_heading_groups(prows[-1], size) and statistics.median(
+                e.get('run_size_px', 0) for e in prows[-1]) >= .95 * size and not R8_ANY_LABEL.match(' '.join(e['text'] for e in prows[-1])):
+            r8_doubt(p['page'], hull([cb, t['box_px']]), 'wide_label_caption:heading_at_part_foot')
+            continue
+        members = [m for m in t['members'] if m not in cm]
+        nt = dict(t, members=members, box_px=hull(runs[m]['box_px'] for m in members if m in runs))
+        p['tables'][p['tables'].index(t)] = nt
+        for i, b in enumerate(p.get('blocks', [])):
+            if set(cm) & set(b['members']):
+                rest = [m for m in b['members'] if m not in cm]
+                live = [runs[m]['box_px'] for m in rest if m in runs]
+                p['blocks'][i] = dict(b, members=rest, **({'box_px': hull(live)} if live else {}))
+        p['blocks'].append(dict(id=bid, members=cm, box_px=cb))
+        p['floats'].append(dict(caption=label_fix(' '.join(prose_row(r, p, render_marks=False)[0] for r in text_rows(cap))),
+                                blocks=[bid, t['id']], _caption_ids=cm, box_px=hull([cb, r8_drawn_box(p, nt['box_px'], size)]),
+                                _r8_keep_place='after_label' if label_prose and not label_inside else 'part_label'))
+        heldf |= set(cm)
+        p.setdefault('copy_table_frames', []).append(dict(id=t['id'], frame=hull([cb, nt['box_px']]), members=cm,
+                                                          why='TF7: a wide-list table label next to a part printed with no caption'))
+
+
+def r8_figure_part(p, body):
+    """Step 2, the picture wall, with checks TK6 and TK7 (TK9 with a label): a part that a table float holds beside its
+    other parts and that holds a drawing fails TK6 when three or more small drawn marks (outlines no larger than one
+    normal em either way: plot symbols) lie inside it; TK7 is read as well (a figure label line directly under it, its
+    top within three normal pitches of the part's last line, sharing its width). The part has a table label, so by
+    TK9 it stays a table and the place goes on the doubt list, with the checks it fails, unless three marks agree
+    (memo 1): the figure label under it (TK7), the table's closing drawn line (a long rule across the float's other
+    part, under that part's last row and above this one) and that other part's rows ending above the line. Then the
+    part leaves the table float: the drawing and its lettering go to a figure float of that label (the label line and
+    its caption lines under it), as the program does for a grid directly above a figure label."""
+    nm = p.get('_r8_normal') or {}
+    size, pitch = nm.get('size'), nm.get('pitch')
+    if not size or not pitch:
+        return
+    runs = {e['id']: e for e in p['elements'] if e['kind'] == 'text'}
+    up = [e for e in runs.values() if e['text'].strip() and not round(e.get('angle', 0)) % 360]
+    marks = [e['box_px'] for e in p['elements'] if e['kind'] == 'outline'
+             and e['box_px'][2] - e['box_px'][0] <= size and e['box_px'][3] - e['box_px'][1] <= size]
+    figlab = re.compile(r'^\s*(?:Fig\.?|Figure|FIGURE|FIG\.?|F\s?I\s?G\s?U\s?R\s?E)\s*' + R8_NUM + r'\b')
+    tables = {t['id']: t for t in p.get('tables', [])}
+    for f in list(p.get('floats', [])):
+        if not re.match(r'^(?:\S+\s+)?Tables?\s+' + R8_NUM + r'\b', label_fix(f.get('caption', '')), re.I):
+            continue
+        parts = [tables[b] for b in f['blocks'] if b in tables and not round(tables[b].get('angle', 0)) % 360 and tables[b].get('box_px')]
+        if len(parts) < 2:
+            continue
+        def drawn(t):
+            b = t['box_px']
+            return sum(b[0] - 1 <= (m[0] + m[2]) / 2 <= b[2] + 1 and b[1] - 1 <= (m[1] + m[3]) / 2 <= b[3] + 1 for m in marks)
+        for t in parts:
+            tb = t['box_px']
+            tk6 = drawn(t) >= 3
+            under = [e for e in up if e['id'] not in t['members'] and tb[3] - .2 * size <= e['box_px'][1] <= tb[3] + 3 * pitch
+                     and min(e['box_px'][2], tb[2]) > max(e['box_px'][0], tb[0])]
+            first = min(text_rows(under), key=lambda r: hull(e['box_px'] for e in r)[1]) if under else []
+            tk7 = bool(first) and bool(figlab.match(' '.join(e['text'] for e in first)))
+            if not tk6:
+                continue
+            # memo 1: the table's closing drawn line (a long rule across the other part, under its last row, above
+            # this part) and the other part's rows ending above it
+            others = [x for x in parts if x is not t and x['box_px'][3] <= tb[1] + size and drawn(x) < 3]
+            closing = [e['box_px'] for e in p['elements'] if e['kind'] == 'rule' and e['box_px'][3] - e['box_px'][1] < .3 * size
+                       and any(x_overlap(e['box_px'], x['box_px']) > .8 and e['box_px'][2] - e['box_px'][0] >= .8 * (x['box_px'][2] - x['box_px'][0])
+                               and x['box_px'][3] - size <= e['box_px'][1] and x['box_px'][3] <= e['box_px'][3] + size for x in others)
+                       and e['box_px'][3] <= tb[1] + .2 * size]
+            if not (tk7 and others and closing):
+                r8_doubt(p['page'], tb, 'table_part_picture_marks:' + ('TK6' if tk6 else '') + ('TK7' if tk7 else ''))
+                continue
+            # the three marks agree: the part ends at the closing line, the drawing and its lettering go to the figure
+            # label under it (as the program gives a grid directly above a figure label to that figure)
+            cap = list(first)
+            cb = hull(e['box_px'] for e in cap)
+            for r in text_rows([e for e in up if e['box_px'][1] > cb[3] and e['box_px'][1] < cb[3] + 6 * pitch
+                                and cb[0] - size <= e['box_px'][0] and e['box_px'][2] <= tb[2] + size]):
+                b = hull(e['box_px'] for e in r)
+                if b[1] - cb[3] > .8 * size or abs(b[0] - cb[0]) > size or len(r8_groups(r, size)) > 1:
+                    break
+                cap.extend(r); cb = hull([cb, b])
+            drawing = [e['box_px'] for e in p['elements'] if e['kind'] in ('rule', 'fill', 'outline')
+                       and tb[0] - 2 <= e['box_px'][0] and e['box_px'][2] <= tb[2] + 2 and tb[1] - 2 <= e['box_px'][1] and e['box_px'][3] <= tb[3] + 2]
+            seed = hull([tb] + drawing)
+            inside = lambda m: m in runs and seed[0] - 2 <= runs[m]['box_px'][0] and runs[m]['box_px'][2] <= seed[2] + 2 and seed[1] - 2 <= runs[m]['box_px'][1] and runs[m]['box_px'][3] <= seed[3] + 2
+            moved_blocks = {b['id'] for b in p.get('blocks', []) if b['id'] in f['blocks'] and b.get('members')
+                            and all(inside(m) for m in b['members'] if m in runs)}
+            extra = sorted({m for b in p.get('blocks', []) if b['id'] in moved_blocks for m in b['members'] if m in runs} - set(t['members']))
+            f['blocks'] = [b for b in f['blocks'] if b != t['id'] and b not in moved_blocks]
+            f['box_px'] = hull([x['box_px'] for x in others] + [b['box_px'] for b in p.get('blocks', []) if b['id'] in f['blocks'] and b.get('box_px')])
+            p['tables'] = [x for x in p['tables'] if x is not t]
+            p.setdefault('_figure_regions', []).append(seed)
+            cm = [e['id'] for e in cap]
+            held_cap = any(set(cm) & set((next((b for b in p.get('blocks', []) if b['id'] == x), {}) or {}).get('members', []))
+                           for g in p['floats'] for x in g.get('blocks', []))
+            if not held_cap:
+                for i, b in enumerate(p.get('blocks', [])):
+                    if set(cm) & set(b['members']):
+                        rest = [m for m in b['members'] if m not in cm]
+                        live = [runs[m]['box_px'] for m in rest if m in runs]
+                        p['blocks'][i] = dict(b, members=rest, **({'box_px': hull(live)} if live else {}))
+            bid = 'copy:r8figure:' + cm[0]
+            p['blocks'].append(dict(id=bid, members=cm, box_px=cb))
+            letters = [m for m in list(t['members']) + extra if m in runs and m not in cm]
+            lid = 'copy:r8lettering:' + t['id']
+            p['blocks'].append(dict(id=lid, members=letters, box_px=seed))
+            key = re.sub(r'\s', '', label_fix(cap[0]['text']).split('.')[0]).lower()
+            same = next((g for g in p['floats'] if re.sub(r'\s', '', label_fix(g.get('caption', '')).split('.')[0]).lower() == key), None)
+            if same:   # the figure's caption float already read: the drawing and its words join it
+                same['blocks'] = list(same['blocks']) + [lid]
+                same['box_px'] = hull([same['box_px'], seed]) if same.get('box_px') else hull([seed, cb])
+                same['lettering'] = list(same.get('lettering', [])) + letters
+                same['_r8_figure_text'] = letters
+                p['blocks'] = [b for b in p['blocks'] if b['id'] != bid]
+            else:
+                p['floats'].append(dict(caption=label_fix(' '.join(e['text'] for e in cap)), blocks=[bid, lid], _caption_ids=cm,
+                                        lettering=letters, _r8_figure_text=letters, box_px=hull([seed, cb])))
+            p.setdefault('copy_table_frames', []).append(dict(id=t['id'], frame=seed, members=[],
+                why='TK6+TK7 with the closing line: a drawing with plot marks over a figure label leaves the table float'))
+
+
+def r8_heading_groups(row, size):
+    """a row set as a heading by its groups: one group, or a section number and one group ('3.4.' and its title)"""
+    g = r8_groups(row, size)
+    return len(g) == 1 or len(g) == 2 and bool(re.fullmatch(r'[\dIVX]+(?:\.\d+)*\.?', ' '.join(e['text'] for e in g[0]).strip()))
+
+
+def r8_drawn_box(p, box, size):
+    """the box grown by the drawn rules and fills joined to it (touching it within one normal em, sharing half the
+    narrower width): the float's region covers the table's own frame"""
+    box = list(box)
+    marks = [e['box_px'] for e in p['elements'] if e['kind'] in ('rule', 'fill')]
+    grown = True
+    while grown:
+        grown = False
+        for m in marks:
+            if (m[1] <= box[3] + size and m[3] >= box[1] - size and x_overlap(m, box) >= .5
+                    and (m[0] < box[0] - .5 or m[1] < box[1] - .5 or m[2] > box[2] + .5 or m[3] > box[3] + .5)):
+                box = hull([box, m]); grown = True
+    return box
+
+
+def r8_groups(row, size):
+    """the groups of words of a printed row: runs parted by white wider than one and a half ems"""
+    groups = []
+    for e in row:
+        if groups and e['box_px'][0] - groups[-1][-1]['box_px'][2] <= 1.5 * size:
+            groups[-1].append(e)
+        else:
+            groups.append([e])
+    return groups
+
+
+R7_BOLD_FACE = re.compile(r'(?:Bold|Black|Heavy|Semibold|SemiBold|Demi)|-B$|-BI$|,Bold')
+
+
+def released_heading_row(row, p, body, gap_above, after_heading=False):
+    """Round 7 send-back item 1 (lane r7-edges): a released row read as a heading by the page.
+    Type: set at 1.08 body or more, or in a face other than the body face that is bold or set in capitals.
+    Shape: at most twelve words, not ending in a full stop, not filling its column. White: at least half a body
+    em of white above it (more than the leading between body lines), or the first row of the released stretch, or
+    a heading row directly above it (a heading set on two rows).
+    -> 'heading' when type, shape and white agree; 'doubt' when type and shape say heading but the white does
+    not; '' otherwise."""
+    text=' '.join(e['text'] for e in row).strip()
+    words=text.split()
+    if not words or len(words)>12 or text.endswith('.') or not re.search(r'[A-Za-z]{3}',text):return ''
+    size=statistics.median(e.get('run_size_px',body) for e in row)
+    counts=collections.Counter()
+    for e in row:counts.update(e.get('_faces') or {})
+    face=max(counts,key=counts.get) if counts else ''
+    styled=face and face!=p.get('_body_face') and (R7_BOLD_FACE.search(face) or text.isupper())
+    if not (size>=1.08*body or styled):return ''
+    return 'heading' if gap_above is None or gap_above>=.5*body or after_heading else 'doubt'
+
+
+def release_body_rows(p, t, released, body):
+    """Return released runs to the column stream as the page sets them (lane r7-edges): each page column's rows
+    in order. A heading (released_heading_row) is a block of its own, before its text, marked so the copy prints
+    it as it prints the paper's other headings; where its marks disagree it stays in the text block and the place
+    is a doubt (TE10)."""
+    groups=[]
+    for left,right in (p.get('main_text') or {}).get('columns',[]):
+        rows=text_rows([e for e in released if left-body<=e['box_px'][0] and e['box_px'][2]<=right+body])
+        prev=None;last=''
+        for row in rows:
+            b=hull(e['box_px'] for e in row)
+            kind=released_heading_row(row,p,body,None if prev is None else b[1]-prev,last=='heading');last=kind
+            prev=b[3]
+            if kind=='doubt':edges_doubt(p['page'],b,'released_heading_marks_disagree')
+            heading=kind=='heading'
+            if groups and groups[-1][0]==(left,right) and groups[-1][1]==heading:groups[-1][2].extend(row)
+            else:groups.append(((left,right),heading,list(row)))
+    runs={e['id']:e for e in p['elements'] if e['kind']=='text'}
+    for k,(column,heading,es) in enumerate(groups):
+        gid=dict(id=t['id']+':r7-'+str(k))
+        if heading:
+            # a heading the page reading had put at the head of a body block leaves that block: it is a block of its
+            # own before the block's text
+            ids={e['id'] for e in es}
+            mt=p.get('main_text') or {}
+            ordered={b['id'] for b in mt.get('blocks',[]) if b.get('order') is not None}
+            for i,b in enumerate(p.get('blocks',[])):
+                if b['id'] in ordered and ids&set(b['members']) and set(b['members'])-ids:
+                    rest=[m for m in b['members'] if m not in ids]
+                    box=hull(runs[m]['box_px'] for m in rest if m in runs)
+                    p['blocks'][i]=dict(b,members=rest,box_px=box)
+                    mt['blocks']=[dict(x,box_px=box) if x['id']==b['id'] else x for x in mt['blocks']]
+            p['main_text']=mt
+        before={b['id'] for b in (p.get('main_text') or {}).get('blocks',[])}
+        release_table_runs(p,gid,es,body)
+        if heading:
+            size=statistics.median(e.get('run_size_px',body) for e in es)
+            for b in p['main_text']['blocks']:
+                if b['id'] not in before:b.update(size_px=size,r7_heading=True)
+            p.setdefault('copy_r7_headings',[]).append(dict(table=t['id'],text=' '.join(e['text'] for e in es)[:60]))
+
 def recover_table_small_type_tail(p, body):
     """Retain small-type cells between a ruled header and a clear prose break.
 
@@ -9633,7 +12751,7 @@ def table_float_regions(p, body):
             x['box_px'][1]<=e['box_px'][1] and e['box_px'][3]<=x['box_px'][3]
             and (e.get('label_font') or x['box_px'][3]-x['box_px'][1]<4*body) for x in p['elements'])
         if not (LABEL.match(e['text']) or e['id'] in new_styled_labels or e.get('table_caption_label') or
-                ruled_label or framed_label or
+                ruled_label or framed_label or continued_table_label(e['text']) or
                 re.match(r'^\s*(Table|Figure|Fig\.?|Scheme|Box)\s*'+TABLE_NUMBER+r'\s*[.:]',e['text'],re.I)): return None
         txt=label_fix(e['text'])
         return re.match(r'^(Table|Figure|Fig\.?)\s+'+TABLE_NUMBER+r'(?:\.|\b)',txt,re.I)
@@ -10691,7 +13809,12 @@ def caption_column_tail(page, caption, candidates, unflowed=()):
     Return a column, so its rows follow the entire first column, not its rows.
     A group in unflowed (a block rule 6 left out of the flow, never body text)
     may be a shorter second column: it needs no three lines and no length
-    floor; every other test still applies (lane r2-captions).
+    floor; every other test still applies (lane r2-captions). Rule 6 leaves
+    a figure caption's second column out of the flow (lane r4-captionextent).
+    A column of one line is its paragraph's last line and may end short:
+    only its upper width bound applies. A gap wider than four letter heights is
+    still a caption's gutter when the two blocks open at the left edges of two
+    neighbouring page columns (round 5, lane captionside, rule F16).
     """
     if not caption or len(text_rows(caption)) < 3: return []
     left=hull(e['box_px'] for e in caption)
@@ -10707,9 +13830,14 @@ def caption_column_tail(page, caption, candidates, unflowed=()):
         if not short_ok and (len(text_rows(group)) < 3 or sum(len(e['text']) for e in group)<150): continue
         right=hull(e['box_px'] for e in group)
         first=min(group,key=lambda e:(e['box_px'][1],e['box_px'][0]))
-        if (right[0]-left[2]<size or right[0]-left[2]>4*size
+        # Rule F16 (round 5, lane captionside): a ragged-right caption column may end short of its column; then the
+        # second block's gap is the page's own gutter: the caption opens at one page column's left edge and the
+        # second block at the next column's left edge.
+        cols=sorted((page.get('main_text') or {}).get('columns',[]))
+        gutter=any(abs(a[0]-left[0])<=size and abs(b[0]-right[0])<=size for a,b in zip(cols,cols[1:]))
+        if (right[0]-left[2]<size or (right[0]-left[2]>4*size and not gutter)
                 or abs(right[1]-left[1])>size or abs(right[3]-left[3])>3*size
-                or not .8<(right[2]-right[0])/(left[2]-left[0])<1.2
+                or not (.8 if len(text_rows(group))>1 else 0)<(right[2]-right[0])/(left[2]-left[0])<1.2
                 or not re.match(r'^(?:[a-z]|\(?[a-z]\)\s)',first['text']) or not faces(group) or faces(group)!=faces(caption)
                 or any(abs(e.get('run_size_px',e['size_px'])-size)>.05*size for e in group)):
             continue
@@ -10762,7 +13890,9 @@ def caption_tail_unflowed_groups(runs, blocks, mtb, members, cap_runs, excluded,
     groups=[]
     for bid in blocks:
         b=mtb.get(bid)
-        if not b or b.get('order') is not None or b.get('cls')=='furniture' or bid in blocked: continue
+        # A block rule 6 never saw (a float's box hid its runs) is out of the flow too (lane r4-captionextent).
+        if b is None: b={}
+        if b.get('order') is not None or b.get('cls')=='furniture' or bid in blocked: continue
         ms=[m for m in members(bid) if m not in cap_runs and m not in excluded]
         if ms and len(ms)==len(members(bid)): groups.append([runs[m] for m in ms])
     return groups
@@ -11835,6 +14965,310 @@ def subfigure_captions(p, runs, cap_runs, box, body, taken=()):
     return [found[k] for k in letters]
 
 
+def body_grid_runs(runs, body, furniture=frozenset(), any_type=False):
+    """F10: the upright runs that are body text by the page alone: a run sits on a left edge where two more runs of
+    its size start within two of its own lines (or it is indented from them by a paragraph indent), fills most of
+    their width and holds four or more words; it is in the body type (the most common size of such runs, or a
+    second size of running text close to it); a full run in the body type on such an edge of its page, the short
+    last line under such a run and an indented first line over or under it (a new paragraph) are body text too. Figure words (short,
+    scattered, off the edge or in another size) are not. any_type: running text of any size (a reference list, a
+    note set small), the same test without the body type."""
+    up = {m: e for m, e in runs.items() if round(e.get('angle', 0)) % 360 == 0 and m not in furniture and e['text'].strip()}
+    size = lambda e: e.get('run_size_px') or e.get('size_px') or body
+    cy = lambda e: (e['box_px'][1] + e['box_px'][3]) / 2
+    wid = lambda e: e['box_px'][2] - e['box_px'][0]
+    tol = .3 * body
+    cand = [m for m, e in up.items() if len(e['text'].split()) >= 4 and wid(e) >= 6 * body]
+    para = set()
+    for m in cand:
+        e = up[m]
+        near = [up[x] for x in cand if x != m and abs(size(up[x]) - size(e)) <= .04 * body
+                and abs(cy(up[x]) - cy(e)) <= 2.6 * 1.25 * size(e)
+                and min(up[x]['box_px'][2], e['box_px'][2]) - max(up[x]['box_px'][0], e['box_px'][0]) > .5 * min(wid(up[x]), wid(e))]
+        same = [x for x in near if abs(x['box_px'][0] - e['box_px'][0]) <= tol]
+        ind = [x for x in near if 0 < e['box_px'][0] - x['box_px'][0] <= 3.2 * body]
+        base = same if len(same) >= 2 else (ind if len(ind) >= 2 and len({round(x['box_px'][0] / tol) for x in ind}) <= 2 else [])
+        if len(base) >= 2 and wid(e) >= .75 * max(wid(x) for x in base) and max(wid(x) for x in base) >= 6 * body:
+            para.add(m)
+    sizes = collections.Counter()
+    for m in para:
+        sizes[round(size(up[m]), 1)] += len(up[m]['text'])
+    if not sizes:
+        return set()
+    top, n = sizes.most_common(1)[0]
+    body_sizes = [s for s, k in sizes.items() if s == top or (k >= .3 * n and .88 <= s / top <= 1 / .88)]
+    in_type = (lambda e: True) if any_type else (lambda e: any(abs(size(e) - s) <= .04 * body for s in body_sizes))
+    para = {m for m in para if in_type(up[m])}
+    edges = collections.defaultdict(list)
+    for m in para:
+        edges[round(up[m]['box_px'][0] / tol)].append(wid(up[m]))
+    eds = [(k * tol, sorted(v)[len(v) // 2]) for k, v in edges.items() if sum(len(edges.get(k + d, [])) for d in (-1, 0, 1)) >= 3]
+    for m, e in up.items():
+        if m not in para and len(e['text'].split()) >= 4 and in_type(e) and \
+                any(abs(e['box_px'][0] - k) <= tol + .5 and wid(e) >= .6 * w for k, w in eds):
+            para.add(m)
+    grown = True
+    while grown:
+        grown = False
+        for m, e in up.items():
+            if m in para:
+                continue
+            if any(abs(size(up[x]) - size(e)) <= .04 * body and 0 < abs(cy(e) - cy(up[x])) <= 1.6 * size(up[x])
+                   and (abs(up[x]['box_px'][0] - e['box_px'][0]) <= tol or
+                        0 < e['box_px'][0] - up[x]['box_px'][0] <= 3.2 * body)
+                   and e['box_px'][2] <= up[x]['box_px'][2] + tol for x in para):
+                para.add(m)
+                grown = True
+    return para
+
+
+def figure_space_runs(p, runs, body, floats_out, taken, body_ids, table_ids=frozenset(), furniture=frozenset()):
+    """F8, F9, F10, F12: from each figure caption the copy prints, its figure is looked for on the side F3 gives
+    (above the caption; below it only when nothing is printed or drawn above). The figure space runs over the
+    caption's width, widened to the drawing found in it, to the nearest body text line (body_grid_runs), another
+    float's caption, a table or the page head. Main-text runs (body_ids) in that space that are not body text, not
+    taken by any float, table, note or furniture, and do not start where the page's running text starts are the
+    figure's words: run id -> record; above a caption (between the body text and the caption) also the runs no rule
+    has placed yet. A run that crosses the space's edge is not taken."""
+    up = {m: e for m, e in runs.items() if round(e.get('angle', 0)) % 360 == 0 and e['text'].strip()}
+    furn = set(furniture)
+    grid = body_grid_runs(up, body, furn)
+    if not grid:
+        return {}
+    text = grid | body_grid_runs(up, body, furn, any_type=True)     # running text of any size bounds a figure too
+    size = lambda e: e.get('run_size_px') or e.get('size_px') or body
+    edges = sorted({round(up[m]['box_px'][0], 1) for m in grid})
+    measure = collections.defaultdict(list)                         # a running-text edge -> the right ends of its lines
+    for m in grid:
+        measure[round(up[m]['box_px'][0] / (.3 * body))].append(up[m]['box_px'][2])
+    region = p.get('region_box_px') or [0, 0, 1e9, 1e9]
+    W = region[2] - region[0]
+    drawn = [e['box_px'] for e in p.get('elements', []) if e['kind'] in ('image', 'rule', 'fill', 'outline')
+             and not e.get('overlay') and (e['box_px'][2] - e['box_px'][0]) < .9 * W]
+    figs = [f for f in floats_out if f[1] == 'figure' and f[5].get('caption_box') and f[5].get('caption_ids')]
+    cols = [c for c in (p.get('main_text') or {}).get('columns', []) if c[1] > c[0]]
+    # the column grid repeats: with two or more columns of one width, a column the page leaves without body text
+    # (one that holds only figures) lies one gutter and one width beside them (for the paragraph-indent test only)
+    frame_cols = sorted(cols)
+    if len(frame_cols) >= 2:
+        ws_ = [c[1] - c[0] for c in frame_cols]
+        gs_ = [b[0] - a[1] for a, b in zip(frame_cols, frame_cols[1:])]
+        if max(ws_) - min(ws_) <= .5 * body and all(0 < g <= 3 * body for g in gs_):
+            w_, g_ = ws_[0], gs_[0]
+            while frame_cols[0][0] - g_ - w_ >= region[0] - .5 * body:
+                frame_cols.insert(0, [frame_cols[0][0] - g_ - w_, frame_cols[0][0] - g_])
+            while frame_cols[-1][1] + g_ + w_ <= region[2] + .5 * body:
+                frame_cols.append([frame_cols[-1][1] + g_, frame_cols[-1][1] + g_ + w_])
+    cap_all = {m for f in floats_out for m in (f[5].get('caption_ids') or [])}
+    top_text = min((up[m]['box_px'][1] for m in grid if m not in cap_all), default=region[1])
+    bot_text = max((up[m]['box_px'][3] for m in grid if m not in cap_all), default=region[3])
+    out = {}
+    cyc = lambda b: (b[1] + b[3]) / 2
+    bt = lambda e: abs(size(e) - body) <= .06 * body
+    # F10 (memo floatspace-pool-1): body type on a column's left edge, or at a paragraph or list indent from it, is
+    # body text; so is a heading of the paper (body type or larger) standing on a column's left edge
+    lefts = sorted({round(c[0], 1) for c in frame_cols} | set(edges))
+    edge_text = {m for m, e in up.items() if m not in furn and len(e['text'].split()) <= 60 and
+                 (bt(e) and any(-.3 * body <= e['box_px'][0] - x <= 4 * body for x in lefts) or
+                  size(e) > 1.06 * body and any(abs(e['box_px'][0] - x) <= .3 * body for x in lefts))}
+    # a heading of the paper in any type: a short run on a column's left edge with body text right under it
+    body_heads = {m for m, e in up.items() if m not in furn and m not in grid and len(e['text'].split()) <= 12
+                  and size(e) >= .75 * body and any(abs(e['box_px'][0] - x) <= .3 * body for x in lefts)
+                  and any(0 < up[g]['box_px'][1] - e['box_px'][3] <= 2.5 * body and
+                          min(up[g]['box_px'][2], e['box_px'][2]) > max(up[g]['box_px'][0], e['box_px'][0]) for g in grid)}
+    edge_text |= body_heads
+
+    def xov(b, xr):
+        return min(b[2], xr[1]) - max(b[0], xr[0]) > .3 * min(b[2] - b[0], xr[1] - xr[0])
+
+    def big(d):
+        return max(d[2] - d[0], d[3] - d[1]) > 3 * body
+
+    for f in figs:
+        own = set(f[5]['caption_ids'])
+        if any(round(runs[m].get('angle', 0)) % 360 for m in own if m in runs):
+            continue
+        cb = f[5]['caption_box']
+
+        released = set()                                 # running text of a free neighbour column stretch: figure text
+
+        def hard(m):
+            return (m in text and m not in released) or (m in cap_all and m not in own) or m in table_ids or \
+                (m in edge_text and m not in own)
+
+        def bound(direction, xr):
+            if direction == 'above':
+                lines = sorted((m for m, e in up.items() if m not in own and e['box_px'][3] <= cb[1] + .3 * body and xov(e['box_px'], xr)),
+                               key=lambda m: -up[m]['box_px'][3])
+                lim = region[1]
+                for m in lines:
+                    if hard(m):
+                        return max(lim, up[m]['box_px'][3])
+                head = [up[m]['box_px'][3] for m in furn if m in up and up[m]['box_px'][3] <= min(cb[1], top_text) and xov(up[m]['box_px'], xr)]
+                return max([lim] + head)
+            lines = sorted((m for m, e in up.items() if m not in own and e['box_px'][1] >= cb[3] - .3 * body and xov(e['box_px'], xr)),
+                           key=lambda m: up[m]['box_px'][1])
+            lim = region[3]
+            for m in lines:
+                if hard(m):
+                    return min(lim, up[m]['box_px'][1])
+            foot = [up[m]['box_px'][1] for m in furn if m in up and up[m]['box_px'][1] >= max(cb[3], bot_text) and xov(up[m]['box_px'], xr)]
+            return min([lim] + foot)
+
+        def blocked(band, c, sp):
+            """a neighbour column's stretch is not free when it holds body text, a caption or table, or running text
+            that goes on from the column above the space (a reference list or notes running down the column)"""
+            if any(m in grid or m in edge_text or (m in cap_all and m not in own) or m in table_ids or
+                   (len(up[m]['text'].split()) >= 4 and abs(size(up[m]) - body) <= .06 * body) for m in band):
+                return True
+            run_text = [m for m in band if m in text]
+            if not run_text:
+                return False
+            t = min(run_text, key=lambda m: up[m]['box_px'][1])
+            tb = up[t]['box_px']
+            return any(x not in band and c[0] <= (e['box_px'][0] + e['box_px'][2]) / 2 <= c[1]
+                       and tb[1] - 1.2 * size(up[t]) <= e['box_px'][3] <= tb[1] + .3 * size(up[t]) for x, e in up.items())
+
+        def colspan(x0, x1):
+            span = [c for c in cols if min(c[1], x1) - max(c[0], x0) > 2]
+            return (min([x0] + [c[0] for c in span]), max([x1] + [c[1] for c in span]))
+
+        def space(direction):
+            # F8, F9: the space lies on the picture's side. A picture set against the caption on that side gives the
+            # space its width (no column is added); with no picture there, the caption's columns, widened to the
+            # drawing reached in the space and to a neighbouring column whose stretch holds figure words and no
+            # body text (a figure drawn wider than its caption)
+            if direction == 'above':
+                adj = [d for d in drawn if big(d) and cb[1] - 3 * body <= d[3] <= cb[1] + .5 * body and xov(d, (cb[0], cb[2]))]
+            else:
+                adj = [d for d in drawn if big(d) and cb[3] - .5 * body <= d[1] <= cb[3] + 3 * body and xov(d, (cb[0], cb[2]))]
+            xr = (min([cb[0]] + [d[0] for d in adj]), max([cb[2]] + [d[2] for d in adj])) if adj else colspan(cb[0], cb[2])
+            for _ in range(4):
+                lim = bound(direction, xr)
+                sp = [xr[0], lim, xr[1], cb[1]] if direction == 'above' else [xr[0], cb[3], xr[1], lim]
+                pieces = [d for d in drawn if d[0] <= sp[2] and d[2] >= sp[0] and d[1] >= sp[1] - 2 and d[3] <= sp[3] + 2
+                          and max(d[2] - d[0], d[3] - d[1]) > .75 * body]
+                nx = (min([xr[0]] + [d[0] for d in pieces]), max([xr[1]] + [d[2] for d in pieces]))
+                for c in ([] if adj else cols):
+                    if c[0] >= nx[1] - 2 and c[0] - nx[1] <= 3 * body or c[1] <= nx[0] + 2 and nx[0] - c[1] <= 3 * body:
+                        band = [m for m, e in up.items() if c[0] <= (e['box_px'][0] + e['box_px'][2]) / 2 <= c[1]
+                                and sp[1] <= cyc(e['box_px']) <= sp[3]]
+                        if band and not blocked(band, c, sp) and any(m in body_ids and m not in taken for m in band):
+                            nx = (min(nx[0], c[0]), max(nx[1], c[1]))
+                            released.update(m for m in band if m in text and m not in grid)
+                if nx[0] >= xr[0] - 1 and nx[1] <= xr[1] + 1:
+                    break
+                xr = nx
+            words = [m for m, e in up.items() if m not in own and sp[0] <= (e['box_px'][0] + e['box_px'][2]) / 2 <= sp[2]
+                     and sp[1] <= cyc(e['box_px']) <= sp[3] and not hard(m)]
+            return sp, pieces, words
+
+        # F13, F9: a caption beside its picture (a picture level with the caption, to its side or round it): the
+        # space is the picture's own extent
+        ch = cb[3] - cb[1]
+
+        def frames_caption(d):                           # the caption's own box or a panel round it is no picture
+            return d[0] <= cb[0] + 2 and d[2] >= cb[2] - 2 and d[1] <= cb[1] + 2 and d[3] >= cb[3] - 2
+
+        side = [d for d in drawn if big(d) and not frames_caption(d) and min(d[3], cb[3]) - max(d[1], cb[1]) >= .5 * ch
+                and max(d[0] - cb[2], cb[0] - d[2]) <= 3 * body]
+        if side:
+            grp = list(side)
+            grown = True
+            while grown:
+                grown = False
+                for d in drawn:
+                    if d not in grp and big(d) and not frames_caption(d) and any(d[0] <= g[2] + body and g[0] <= d[2] + body and d[1] <= g[3] + body and g[1] <= d[3] + body for g in grp):
+                        grp.append(d); grown = True
+            sp = [min(d[0] for d in grp), min(d[1] for d in grp), max(d[2] for d in grp), max(d[3] for d in grp)]
+            pieces = grp
+            words = [m for m, e in up.items() if m not in own and sp[0] <= (e['box_px'][0] + e['box_px'][2]) / 2 <= sp[2]
+                     and sp[1] <= cyc(e['box_px']) <= sp[3] and not hard(m)]
+            direction = 'beside'
+        else:
+            sp, pieces, words = space('above')
+            direction = 'above'
+        if direction != 'beside' and (sp[3] - sp[1] < .5 * body or not (pieces or words)):
+            sp2, pieces2, words2 = space('below')
+            if pieces2 or words2:
+                sp, pieces, words, direction = sp2, pieces2, words2, 'below'
+        for m in words:
+            e = up[m]
+            b = e['box_px']
+            if m in taken or m in out or not (m in body_ids or direction in ('above', 'beside')):
+                continue                                     # under a figure's caption only main text: notes follow a caption
+            if b[0] < sp[0] - 2 or b[2] > sp[2] + 2 or b[1] < sp[1] - .3 * body or b[3] > sp[3] + .3 * body:
+                continue                                     # a run across the space's edge is not wholly the figure's
+            if size(e) > 1.08 * body:
+                continue                                     # display type: a heading, never taken as lettering
+            if any(abs(b[0] - x) <= .3 * body for x in edges) and abs(size(e) - body) <= .06 * body:
+                continue                                     # it starts where the page's running text starts
+            if abs(size(e) - body) <= .06 * body and any(
+                    0 < b[0] - k * .3 * body <= 3.2 * body and abs(b[2] - sorted(v)[len(v) // 2]) <= .5 * body
+                    for k, v in measure.items() if len(v) >= 3):
+                continue                                     # F10: a full line set in by a paragraph indent opens a paragraph
+            if abs(size(e) - body) <= .06 * body and any(
+                    0 < b[0] - c0 <= 3.2 * body and abs(b[2] - c1) <= .5 * body for c0, c1 in frame_cols):
+                continue                                     # the same against the page's column frame (a column that starts with it)
+            if m not in body_ids and any(x in taken and abs(size(up[x]) - size(e)) <= .04 * body
+                                         and -.3 * size(e) <= max(up[x]['box_px'][1] - b[3], b[1] - up[x]['box_px'][3]) <= .8 * size(e)
+                                         and min(up[x]['box_px'][2], b[2]) > max(up[x]['box_px'][0], b[0]) for x in up):
+                continue                                     # an unplaced run that continues a block another owner holds
+            out[m] = dict(caption=sorted(own)[0], direction=direction, space=[round(v, 1) for v in sp], _place=f[5])
+    # Output check (memo floatspace-holdback-1), whatever the cause: a run in the body type taken as lettering must
+    # not neighbour, at body line spacing, a body-type line that stays body text; and a main-text block may not lose
+    # some of its lines while others stay body text. Such places stay as the baseline had them.
+    kept = []
+    # memo floatspace-pool-1: no heading of the body, no body-type line with a body-type neighbour at the column's
+    # line spacing and no list item of the body leaves the body
+    steps = [min(d) for a in grid if (d := [abs(cyc(up[a]['box_px']) - cyc(up[x]['box_px'])) for x in grid if x != a
+             and abs(cyc(up[a]['box_px']) - cyc(up[x]['box_px'])) > .5 * body and xov(up[a]['box_px'], (up[x]['box_px'][0], up[x]['box_px'][2]))])]
+    pitch = statistics.median(steps) if steps else 1.2 * body
+    marker = re.compile(r'^\s*(?:[•●◦▪■\-–]|\(?\d{1,2}[.)]|\(?[a-z][.)])(?:\s|$)')
+    for m in list(out):
+        e = up[m]
+        b = e['box_px']
+        heading = m in body_heads or (m in body_ids and size(e) >= .94 * body and any(abs(b[0] - x) <= .3 * body for x in lefts))
+        neighbour = bt(e) and any(x != m and bt(f) and abs(abs(cyc(f['box_px']) - cyc(b)) - pitch) <= .15 * pitch and
+                                  min(f['box_px'][2], b[2]) > max(f['box_px'][0], b[0]) for x, f in up.items())
+        listed = m in body_ids and (marker.match(e['text']) or any(
+            x != m and re.fullmatch(r'\s*(?:[•●◦▪■\-–]|\(?\d{1,2}[.)]|\(?[a-z][.)])\s*', f['text']) and
+            abs(cyc(f['box_px']) - cyc(b)) <= .4 * size(e) and 0 <= b[0] - f['box_px'][2] <= 2 * body for x, f in up.items()))
+        if heading or neighbour or listed:
+            kept.append(m); del out[m]
+            doubts_module().add('F12', p.get('page', 0), b, 'figure_space_kept_in_body:' +
+                                ('heading' if heading else 'body_neighbour' if neighbour else 'list_item'))
+    changed = True
+    while changed:
+        changed = False
+        for m in list(out):
+            e = up[m]
+            b = e['box_px']
+            if bt(e) and any(x not in out and x in body_ids and x not in taken and bt(f) and
+                             0 < abs(cyc(f['box_px']) - cyc(b)) <= 1.6 * max(size(e), size(f)) and
+                             min(f['box_px'][2], b[2]) > max(f['box_px'][0], b[0]) for x, f in up.items()):
+                kept.append(m); del out[m]; changed = True
+                doubts_module().add('F12', p.get('page', 0), b, 'figure_space_kept_in_body:next_to_body_text')
+        if hasattr(body_ids, 'get'):
+            for m in list(out):
+                bid = body_ids.get(m)
+                if bid is None or m not in out:
+                    continue
+                mates = [x for x, b2 in body_ids.items() if b2 == bid]
+                if any(x not in out and x not in taken for x in mates):
+                    for x in mates:
+                        if x in out:
+                            kept.append(x); del out[x]
+                            doubts_module().add('F12', p.get('page', 0), up[x]['box_px'], 'figure_space_kept_in_body:block_stays')
+                    changed = True
+    if kept:
+        p.setdefault('_figure_space_kept', []).extend(sorted(set(kept)))
+    # F12: the words taken are printed as figure text with their figure, in reading order (rows top down, left to right)
+    for m, rec in out.items():
+        rec.pop('_place').setdefault('figure_text_runs', []).append(m)
+    return out
+
+
 def read_page(p, body, uncertain, owned=frozenset()):
     """Return body blocks, floats (top, kind, caption, rows, notes, placement), and side text."""
     if p.get('repository_cover'):
@@ -11859,6 +15293,19 @@ def read_page(p, body, uncertain, owned=frozenset()):
     recover_table_aligned_tail(p,body)
     bound_table_before_body(p,body)
     release_body_column_seeds(p,body)
+    # lane r8-turned: after each rule on the page as it stands, the same rule on the page's turned table parts in their
+    # upright frame (r8_turned_rule); a page with no turned text is not touched by it
+    for rule in (table_gutter_bound,   # round 7 TE5 (lane r7-edges)
+                 table_top_bound,   # round 7 TE1 (lane r7-edges)
+                 table_drawn_growth,   # round 7 TE8 (lane r7-edges)
+                 table_body_look_bound,   # round 7 TE2/TE6 (lane r7-edges)
+                 r8_wide_label_caption,   # round 8 TF7, the wide label list (lane r8-box)
+                 r8_unlabelled_not_table,   # round 8 TK9 without a label (lane r8-box)
+                 r8_figure_part,   # round 8 the picture wall, TK6 and TK7 (lane r8-box)
+                 r8_labelled_part):   # round 8 TF7 with the box of step 2 (lane r8-box)
+        rule(p,body)
+        r8_turned_rule(p,body,rule)
+    extend_turned_float(p, source_page)   # lane r5-turned (F18): a second reading of a turned float page
     if p.get('_copy_table_content'):source_page['_copy_table_content']=p['_copy_table_content']
     if p.get('_copy_body_members'):source_page['_copy_body_members']=p['_copy_body_members']
     if p.get("tables") and not p.get("_table_pdf"):
@@ -12300,6 +15747,7 @@ def read_page(p, body, uncertain, owned=frozenset()):
         # Recurrence can also mark a legitimate repeated continuation label.
         table_members -= set(original_cap_runs)
         cap_rows = text_rows([runs[m] for m in cap_runs])
+        tail=[]
         if lab and not tab_ids and figure_caption:
             # A caption set two columns wide under a spanning picture is often
             # read as one caption column and one body paragraph. Whole body
@@ -12321,6 +15769,11 @@ def read_page(p, body, uncertain, owned=frozenset()):
         table_caption=bool(tab_ids or label_fix(f.get('caption','')).lower().startswith('table'))
         if not table_caption:
             cap_rows=figure_caption_rows([runs[m] for m in cap_runs])
+            if tail:
+                # The second caption column follows the whole first column (caption_column_tail), also when
+                # either column is too short for figure_caption_rows to see two columns (lane r4-captionextent).
+                tail_ids={e['id'] for e in tail}
+                cap_rows=figure_caption_rows([runs[m] for m in cap_runs if m not in tail_ids])+text_rows(tail)
             # r2-fills: a caption set in two columns inside its figure's fill (columns of unequal length)
             cols=fill_text_columns([runs[m] for m in cap_runs], body, [e['box_px'] for e in p['elements'] if e['kind']=='fill'])
             if cols: cap_rows=fill_column_rows(cap_rows, cols)
@@ -12387,7 +15840,16 @@ def read_page(p, body, uncertain, owned=frozenset()):
             grid_runs=[e for e in cell_runs if e not in note_runs]
             # The title lines stay in the table's geometry (its columns and header tiers are read with
             # them, as before) but write no row: the caption holds them (tablesub8).
-            rows, notes = ([],[]) if layout=='unstructured' else table_rows(grid_runs + shapes, body, dict(p,_table_layout=layout,_table_title=title_state))
+            # (F1, TG1, a switch ROWS_UNSTR, off) a part laid out 'unstructured' by a recovery path gets its rows read too, so
+            # the overlay is laid and the user's rules run on it; nothing else about how it is found or boxed changes
+            # (F1, TG1, a second switch ROWS_OVERLAY, off) the same rows serve the overlay only: such a part is held like
+            # every flagged part and prints only from the overlay's forms, never through the older printer
+            rows_for_overlay=layout=='unstructured' and 'ROWS_OVERLAY' in R8_CLUE_FLAGS and 'ROWS_UNSTR' not in R8_CLUE_FLAGS
+            rows, notes = (([],[]) if layout=='unstructured' and not ({'ROWS_UNSTR','ROWS_OVERLAY'}&R8_CLUE_FLAGS)
+                           else table_rows(grid_runs + shapes, body, dict(p,_table_layout=layout,_table_title=title_state)))
+            overlay_rows=None
+            if rows_for_overlay:   # the part itself keeps no rows, as before; the rows go to the overlay alone
+                overlay_rows,rows,notes=rows,[],[]
             title_label_runs, title_label_caption = list(cap_runs), caption
             if title_state['dropped']:
                 cap_runs = cap_runs + [e['id'] for e in title]
@@ -12402,6 +15864,7 @@ def read_page(p, body, uncertain, owned=frozenset()):
                                   preserve_run_lines=any(tables[t].get('_copy_printed_lines') for t in tab_ids))
             if title_state['dropped']: source.update(title_ids=sorted(title_state['ids']),title_caption=title_label_caption)
             source['owned_run_ids']=sorted(region_runs)
+            if overlay_rows: source['_overlay_rows']=overlay_rows
             source['output_run_ids']=[m for t in tab_ids for m in tables[t].get('_output_run_ids',[])]
             source['assembly_warnings']=table_warnings(rows,cell_runs)
             if any(tables[t].get('_copy_tail_recovered') for t in tab_ids):
@@ -12481,6 +15944,9 @@ def read_page(p, body, uncertain, owned=frozenset()):
                            **({'caption_only': True} if f.get('_caption_only') else {}),
                            graphic_box=f.get('_graphic_box') or (float_graphic_box(p, dict(f,box_px=fb), cap_runs) if kind=='figure' or image_only else None),
                            **({'after_block':f['_after_block']} if '_after_block' in f else {}),
+                           **({'r8_keep_place': f['_r8_keep_place']} if f.get('_r8_keep_place') else {}),
+                           **({'r8_turned_caption': True} if f.get('_r8_turned_caption') else {}),
+                           **({'figure_text_runs': list(f['_r8_figure_text']), 'r8_figure_shapes': True} if f.get('_r8_figure_text') else {}),
                            **({'subcaptions': subcaptions} if subcaptions else {}))))
 
     # tables that no caption claimed
@@ -12568,6 +16034,19 @@ def read_page(p, body, uncertain, owned=frozenset()):
                fb[1]-em <= box[1] and box[3] <= fb[3]+em for fb in figure_boxes):
             lettering_ids.add(m); used.add(m)
             source_page.setdefault('copy_figure_lettering', []).append(m)
+
+    # F8-F12 (lane r5-floatspace): a figure's space, found from its caption, runs to the nearest body text; the
+    # off-grid words in it that rule 6 read as main text are the figure's lettering, never body text or a heading.
+    # what the baseline already leaves out as a figure's own lettering (its float's members outside the body) stays so
+    float_own = {m for f in p.get('floats', []) for bid in f['blocks'] for m in members(bid) if m not in body_runs}
+    space_runs = figure_space_runs(p, runs, body, floats_out, used | furniture | footnote_ids | float_own, dict(body_runs),
+                                   {m for t in tables.values() for m in t.get('members', [])}, furniture)
+    for m, rec in space_runs.items():
+        # out of the body (like lettering), printed with the figure as figure text (F12), so never lost
+        lettering_ids.add(m); used.add(m)
+        source_page.setdefault('copy_figure_space', []).append(dict(run=m, **rec))
+    if space_runs:
+        consumed |= {bid for bid in ordered if members(bid) and set(members(bid)) <= lettering_ids}
 
     # Recover body prose misclassified as an unattached caption. A true float has already claimed its runs.
     columns = (p.get("main_text") or {}).get("columns", [])
@@ -12883,9 +16362,136 @@ def read_page(p, body, uncertain, owned=frozenset()):
     # split only at wholly empty vertical gutters, with several sentences on each side.
     out_blocks = []
     panel_blocks = {x for pnl in (p.get("main_text") or {}).get("panels", []) for x in pnl.get("blocks", [])}   # rule 7 placed these
-    for bid, b in sorted(ordered.items(), key=lambda kv: kv[1]["order"]):
-        if bid in consumed: continue
-        ms = [m for m in text_members.get(bid, members(bid)) + extra.get(bid, []) if m not in furniture]
+    # O16, O29-O31 (round 5): a display formula is one block in its column, at its printed place, never
+    # part of a paragraph, a heading or a table. Its runs come from the body blocks and from the
+    # main-text pieces rule 7 left out of the flow; the formula block follows the first body block
+    # that held one of its runs (or the body block above it), and the column sort below sets it at
+    # its printed height.
+    source_page['_formula_doubts'] = []
+    def formula_doubt(zn, rule, reason):
+        source_page['_formula_doubts'].append(dict(rule=rule, page=p['page'], box=zn['box'], reason=reason))
+    def formula_plan(zones):
+        """hosts, taken runs and the reading plan (block pieces and formulas in order) for these formulas"""
+        hosts = collections.defaultdict(list); taken = set()
+        for zn in zones:
+            owners = [block_of_f[m] for m in zn['ids'] if m in block_of_f]
+            host = min(owners, key=lambda bid: ordered[bid]['order']) if owners else None
+            if host is None:
+                above = [(runs[m]['box_px'][3], bid) for m, bid in block_of_f.items() if m not in zn['ids'] and
+                         runs[m]['box_px'][3] <= zn['box'][1] and zn['column'][0]-body <= (runs[m]['box_px'][0]+runs[m]['box_px'][2])/2 <= zn['column'][1]+body]
+                if not above: continue
+                host = max(above)[1]
+            hosts[host].append(zn); taken.update(zn['ids'])
+        # A body block that holds rows above and below a formula (rule 2 joined them across it) is read as its
+        # rows above, the formula, then its rows below; a formula with nothing of its host above it comes first.
+        plan = []
+        for bid, b in sorted(ordered.items(), key=lambda kv: kv[1]["order"]):
+            if bid in consumed: continue
+            rest = [m for m in text_members.get(bid, members(bid)) + extra.get(bid, []) if m not in taken]
+            if bid not in hosts:
+                plan.append((bid, b, rest, None)); continue
+            for zn in sorted(hosts[bid], key=lambda zn: zn['box'][1]):
+                c0, c1 = zn['column']
+                beside = lambda m: c0-body <= (runs[m]['box_px'][0]+runs[m]['box_px'][2])/2 <= c1+body
+                above = [m for m in rest if not beside(m) or (runs[m]['box_px'][1]+runs[m]['box_px'][3])/2 < zn['box'][1]]
+                if above: plan.append((bid, b, above, None))
+                plan.append((bid, b, None, zn))
+                rest = [m for m in rest if m not in above]
+            if rest: plan.append((bid, b, rest, None))
+        return hosts, taken, plan
+    zones_f = []; block_of_f = {}
+    if not (p.get('scan_evidence') or {}).get('ocr_layer'):
+        in_float_runs_f = {m for bid in in_float for m in members(bid)}
+        for bid, b in ordered.items():
+            if bid in consumed: continue
+            for m in text_members.get(bid, members(bid)) + extra.get(bid, []): block_of_f.setdefault(m, bid)
+        loose_f = {m for bid, b in mtb.items() if b.get('order') is None and b.get('cls') not in ('furniture', 'title', 'authors')
+                   for m in members(bid)}
+        blocked = furniture | footnote_ids | in_float_runs_f | set(owned)
+        cands_f = {m for m in block_of_f if m not in blocked} | {m for m in loose_f if m not in blocked and m not in used}
+        frames_f = [t['box_px'] for t in p.get('tables', [])] + [f['box_px'] for f in p.get('floats', []) if f.get('box_px')] + \
+                   [fb for fb in figure_boxes if fb]
+        for zn in display_formula_zones(source_page, runs, cands_f, body, frames_f):
+            if zn.get('inline'): formula_doubt(zn, 'O30', 'inline_stacked_formula'); continue
+            # Output check 1 (hold-back memo 1): a formula block takes whole lines of its column. A run of its
+            # column left outside the formula on the same printed line means the formula sits in running text:
+            # the place stays as printed and is listed.
+            c0, c1 = zn['column']; ids = set(zn['ids'])
+            # Output check 0 (pool memo 1), whatever made the formula: it takes no line of running text (four or
+            # more words of three letters, no operator sign), no run in a filled box that holds such a line, and
+            # no text line of words that it leaves out lies inside its box (a box across a gutter covers the
+            # neighbouring column's lines).
+            zb = zn['box']
+            def wordline(m):
+                t = runs[m]['text']
+                return len(re.findall(r'[^\W\d_]{3,}', t)) >= 4 and not re.search(r'[=+−×÷±<>≤≥/]', t)
+            def inside(m, f):
+                b_ = runs[m]['box_px']; return f[0]-1 <= b_[0] and b_[2] <= f[2]+1 and f[1]-1 <= b_[1] and b_[3] <= f[3]+1
+            fills_f = [e['box_px'] for e in p['elements'] if e.get('kind') == 'fill' and e['box_px'][3]-e['box_px'][1] >= .15*body]
+            wordy_f = [f for f in fills_f if any(wordline(n) for n in cands_f if inside(n, f))]
+            covered = [n for n in cands_f if n not in ids and wordline(n) and
+                       min(runs[n]['box_px'][3], zb[3]) > max(runs[n]['box_px'][1], zb[1]) and
+                       min(runs[n]['box_px'][2], zb[2]) > max(runs[n]['box_px'][0], zb[0])]
+            why = ('takes_text' if any(wordline(m) for m in ids) else 'boxed_text' if any(inside(m, f) for m in ids for f in wordy_f)
+                   else 'covers_text' if covered else None)
+            if why:
+                formula_doubt(zn, 'O30' if zn['stacked'] else 'O29', 'formula_kept_as_printed:' + why); continue
+            def same_line(m, n):
+                bm, bn = runs[m]['box_px'], runs[n]['box_px']
+                return min(bm[3], bn[3])-max(bm[1], bn[1]) >= .5*min(bm[3]-bm[1], bn[3]-bn[1])
+            shared = [n for n in cands_f if n not in ids and c0-body <= (runs[n]['box_px'][0]+runs[n]['box_px'][2])/2 <= c1+body
+                      and any(same_line(m, n) for m in ids)]
+            if shared:
+                formula_doubt(zn, 'O30' if zn['stacked'] else 'O29', 'formula_kept_as_printed:shares_line_with_text'); continue
+            zones_f.append(zn)
+    # Output check 2 (hold-back memo 1): with the formulas cut out, the other runs of every block involved read
+    # in the order the block's own reading (the baseline's) gives them; a formula that breaks it stays as printed.
+    while True:
+        formula_hosts, formula_taken, work = formula_plan(zones_f)
+        if not formula_taken: break
+        involved = set(formula_hosts) | {block_of_f[m] for m in formula_taken if m in block_of_f}
+        bad = set()
+        for bid in involved:
+            if bid not in ordered or bid in consumed: continue
+            whole = [m for m in text_members.get(bid, members(bid)) + extra.get(bid, []) if m not in furniture]
+            def seq(ms):
+                return [e['id'] for r in prose_text_rows([runs[m] for m in ms], source_page) for e in r] if ms else []
+            before = seq(whole)
+            after = [x for pb, _, piece, zn in work if pb == bid and piece is not None for x in seq([m for m in piece if m not in furniture])]
+            common = set(before) & set(after)
+            if [x for x in before if x in common and x not in formula_taken] != [x for x in after if x in common and x not in formula_taken]:
+                bad |= {id(zn) for zn in zones_f if set(zn['ids']) & set(whole) or zn in formula_hosts.get(bid, [])}
+        if not bad: break
+        for zn in zones_f:
+            if id(zn) in bad: formula_doubt(zn, 'O30' if zn['stacked'] else 'O29', 'formula_kept_as_printed:prose_order')
+        zones_f = [zn for zn in zones_f if id(zn) not in bad]
+    def formula_out_block(zn, b, k):
+        """One display formula as a block: its printed rows, top to bottom, each left to right (O30, O16);
+        a simple formula (one baseline) as one line (O29)."""
+        zrs = [runs[m] for m in sorted(zn['ids'], key=lambda m: (runs[m]['box_px'][1], runs[m]['box_px'][0]))]
+        rws = prose_text_rows(zrs, source_page, fractions=not zn['stacked'])
+        if not zn['stacked'] and len(rws) > 1:
+            # one baseline (O29): one row, its pieces by their left edges (raised and lowered pieces among them)
+            rws = [sorted((e for r in rws for e in r), key=lambda e: (e['box_px'][0], e['box_px'][1]))]
+        rows = [prose_row(r, p)[0] for r in rws]
+        boxes = [hull(e['box_px'] for e in r) for r in rws]
+        n = len(rows)
+        meta = dict(b, id=f"formula:{p['page']}:{k}", box_px=hull([zn['box']] + boxes), lines=n, size_px=body)
+        for rule, reason in ([('O30', 'stacked_formula:' + '+'.join(zn['reasons']))] if zn['stacked'] else []) + \
+                            ([('O31', 'formula_unread_sign')] if zn['unread'] else []):
+            source_page['_formula_doubts'].append(dict(rule=rule, page=p['page'], box=meta['box_px'], reason=reason))
+        source_page.setdefault('copy_line_order', []).append(dict(
+            runs=[e['id'] for e in zrs], box_px=meta['box_px'], after=' | '.join(str(t) for t in rows),
+            why='display formula kept as one block at its printed place' + (' (stacked: rows top to bottom)' if zn['stacked'] else '')))
+        return dict(order=b['order'], meta=meta, lines=rows, first=str(rows[0]).strip() if rows else '',
+                    row_boxes=boxes, lefts=[bb[0] for bb in boxes], sizes=[body]*n, emphasis=[False]*n, faces=['']*n,
+                    prefixes=[0]*n, page=p['page'], page_height=p['region_box_px'][3], panel=False,
+                    _box_kind='formula', _formula=dict(stacked=zn['stacked'], number=zn['number'] is not None))
+    formula_count = itertools.count()
+    for bid, b, piece, zn in work:
+        if zn is not None:
+            out_blocks.append(formula_out_block(zn, b, next(formula_count))); used.update(zn['ids']); continue
+        ms = [m for m in piece if m not in furniture]
         # A boxed inset the body text wraps around leaves the block before its rows are read
         # (inset_box_runs); its runs stay unplaced here and are given as side text below.
         inset = inset_box_runs(ms, runs, body)
@@ -12951,10 +16557,10 @@ def read_page(p, body, uncertain, owned=frozenset()):
     # row gap of the same column; a real side column cannot satisfy this test.
     row_keys = ('lines', 'lefts', 'row_boxes', 'sizes', 'emphasis', 'faces', 'prefixes')
     for outer in list(out_blocks):
-        if outer not in out_blocks or outer.get('panel'): continue
+        if outer not in out_blocks or outer.get('panel') or outer.get('_box_kind'): continue
         ob = outer['meta']['box_px']
         for inner in list(out_blocks):
-            if inner is outer or inner.get('panel') or len(inner['lines']) > 3: continue
+            if inner is outer or inner.get('panel') or inner.get('_box_kind') or len(inner['lines']) > 3: continue
             if len(re.findall(r'[A-Za-z]', ' '.join(inner['lines']))) < 3: continue
             ib = inner['meta']['box_px']
             if not (ob[1] < ib[1] and ib[3] < ob[3] and ob[0]-body <= ib[0] and ib[2] <= ob[2]+body): continue
@@ -12995,6 +16601,11 @@ def read_page(p, body, uncertain, owned=frozenset()):
         for m in members(bid): owner.setdefault(m, bid)
     for bid, b in mtb.items():   # lane r3-pullquote: a pull quote lifted out of a column block owns its runs
         if str(b.get('why') or '').startswith('pull quote:'):
+            for m in members(bid): owner[m] = bid
+    # lane r6-abstract (B1): the front part left when rule 6 cut a labelled abstract off the title/byline
+    # block owns its runs, so they stay title/author rows (given from authors.json), never side text
+    for bid, b in blocks.items():
+        if b.get('labelled_abstract') is False and b.get('main_text_source'):
             for m in members(bid): owner[m] = bid
     for m, r in label_to.items():
         if r in owner: owner[m] = owner[r]
@@ -13084,6 +16695,7 @@ def read_page(p, body, uncertain, owned=frozenset()):
             # lane r3-pullquote: a pull quote is a side note of the body (on the front page too, never article
             # information), printed after its page's paragraphs
             source_page.setdefault('_pull_quotes', []).append(txt); used |= set(ms); continue
+        if turned_side_text(side_runs): txt = TurnedSide(txt, side_runs)   # lane r5-turned (F17)
         side.append(txt)
         used |= set(ms)
         if rws is not None and p.get('_copy_front'): front_side.append((rws, key, len(side)-1))
@@ -13093,6 +16705,11 @@ def read_page(p, body, uncertain, owned=frozenset()):
         restored = front_heading_over(rws, p, mtb.get(key, {}), detached, body)
         if restored: detached.append(restored); dropped.add(i)
     side = [t for i, t in enumerate(side) if i not in dropped]
+    # F17 (lane r5-turned): turned side texts are read in their own turned frame, line after line as the turned
+    # area prints them, not by their upright tops; they keep the places the upright order gave the group
+    slots = [i for i, t in enumerate(side) if isinstance(t, TurnedSide)]
+    if len(slots) > 1:
+        for i, t in zip(slots, sorted((side[i] for i in slots), key=lambda t: t.frame_key)): side[i] = t
     for anchor, restored in detached:
         out_blocks.insert(out_blocks.index(anchor) if anchor in out_blocks else
                           next(i for i, b in enumerate(out_blocks) if b is anchor), restored)
@@ -13126,6 +16743,8 @@ def read_page(p, body, uncertain, owned=frozenset()):
                       for bid in f['blocks'] for m in members(bid)}
     for m in figure_members:
         if m not in used and not placeable(m): excluded.setdefault(m, 'figure-interior lettering')
+    for rec in source_page.get('copy_figure_space', []):
+        excluded.pop(rec['run'], None)               # printed as figure text with its figure (lane r5-floatspace)
     for m,e in runs.items():
         if fragment_furniture(e,p,runs,furniture): excluded.setdefault(m,'divider or folio on a furnished margin row')
         if re.fullmatch(r'\(?\s*Contin(?:ues?|ued)\s*\)?',e['text'].strip(),re.I):
@@ -13147,7 +16766,31 @@ def read_page(p, body, uncertain, owned=frozenset()):
     source_page['_conservation_runs'] = [dict(id=m,text=e['text'],box=e['box_px'])
                                        for m,e in runs.items() if m not in excluded]
     flagged = [e for e in runs.values() if e.get("flags") and not e.get('furniture_reason')]
-    if flagged: uncertain.append(f"page {p['page']}: {len(flagged)} text run(s) with overprinted characters (read as the visible layer)")
+    # lane r5-line: a run the boxer now builds as one layer records the runs the per-font layers made of it; each
+    # counts as before, except a lone accent the glyph repair would have composed into its letter and dropped
+    def layer_runs(e):
+        import unicodedata
+        if 'overprint_layers' not in e: return 1
+        chars = dict(zip(e.get('char_ids', []), e.get('_chars', [])))
+        n = 0
+        for ids in e['overprint_layers']:
+            cs = [chars[i] for i in ids if i in chars]
+            if not cs: continue            # composed into its letter by the glyph repair, as the separate run was
+            if len(cs) == 1 and len(cs[0].get('text', '')) == 1 and not cs[0]['text'].isalnum():
+                c = cs[0]
+                mark = reference_accent_mark(dict(text=c['text'], _chars=[c], box_px=[c['x0'], c['y0'], c['x1'], c['y1']]), p)
+                if mark:
+                    # the glyph repair's own test (restore_prose_glyphs): a letter under the mark's ink at the expected height
+                    below = all(unicodedata.combining(ch) in (202, 216, 220) for ch in mark)
+                    if any(b is not c and b.get('text', '').isalpha() and min(c['x1'], b['x1']) - max(c['x0'], b['x0']) > 0 and
+                           ((b['y0'] <= c['y0'] <= b['y1'] + .4 * b['size']) if below else
+                            (b['y0'] - .6 * b['size'] <= c['y0'] and c['y1'] < b['y1'] - .3 * b['size']))
+                           for b in e.get('_chars', [])): continue
+            n += 1
+        return n
+    count = sum(layer_runs(e) for e in flagged)
+    if count: uncertain.append(f"page {p['page']}: {count} text run(s) with overprinted characters (read as the visible layer)")
+    turned_float_leftovers(p, source_page, side, tables, body)   # lane r5-turned (F18)
     return out_blocks, floats_out, side
 
 
@@ -13155,6 +16798,7 @@ def read_page(p, body, uncertain, owned=frozenset()):
 def is_heading(text, meta, body, n_lines):
     """Apply style/size evidence only after the paragraph's positional and sentence checks."""
     if re.fullmatch(r'[*†‡§‖¶#\s]+',text): return False
+    if meta.get('r7_heading'): return True   # lane r7-edges: a heading the page shows, released from a table
     if inside_float_frame(meta.get('box_px'), meta): return False
     if meta.get('heading_candidate') is False: return False
     words = text.split()
@@ -13319,6 +16963,151 @@ def prepare_reference_islands(pages, body):
                 b.update(cls='main',in_refs=True,order=lo+i*(hi-lo)/(len(group)-1))
             p['copy_reference_islands'] = [b['id'] for b,_ in group]
             break
+
+
+class TurnedSide(list):
+    """Side text whose printed lines are turned (rule F17, lane r5-turned): the rows of a group no body rule placed,
+    most of whose characters run at a quarter or half turn from the page's upright text. frame_key orders such
+    groups as the turned area prints them: by angle, then down its lines and along them in the turned frame."""
+    def __init__(self, rows, side_runs):
+        super().__init__(rows)
+        angles = collections.Counter()
+        for e in side_runs: angles[round(e.get('angle', 0)) % 360] += len(e.get('text', ''))
+        angle = max((a for a in angles if a), key=lambda a: angles[a])
+        b = frame(angle)(hull(e['box_px'] for e in side_runs if round(e.get('angle', 0)) % 360 == angle))
+        self.frame_key = (angle, b[1], b[0])
+        # F18 (lane r5-turned, round 5b): the group's turned runs and page box, for the turned float page
+        self.angle = angle
+        self.ids = [e['id'] for e in side_runs if round(e.get('angle', 0)) % 360 == angle]
+        self.box = hull(e['box_px'] for e in side_runs)
+
+
+F18_DOUBTS = []   # (page, hull box, count) of the F18 output check, added to the doubt list at the end of main()
+
+
+def turned_page_angle(p):
+    """F18: the angle of a page where most text is turned (more characters at one turn than upright, at least 200),
+    else None"""
+    count = collections.Counter()
+    for e in p.get('elements', []):
+        if e.get('kind') == 'text': count[round(e.get('angle', 0)) % 360] += len(re.sub(r'\s', '', e.get('text', '')))
+    turned = {a: n for a, n in count.items() if a}
+    if not turned: return None
+    angle = max(turned, key=lambda a: turned[a])
+    return angle if turned[angle] > count[0] and turned[angle] >= 200 else None
+
+
+def turned_float_caption_runs(p, f, tables):
+    """the caption's own runs of a float: its recorded caption ids and the members of its non-table blocks"""
+    blocks = {b['id']: b for b in p.get('blocks', [])}
+    ids = set(f.get('_caption_ids') or [])
+    for bid in f.get('blocks', []):
+        if bid not in tables and bid in blocks: ids |= set(blocks[bid].get('members', []))
+    return ids
+
+
+def turned_float_plan(p, angle, tables):
+    """F18: the float of a turned float page and the table parts to join it. A table label standing in the turned text
+    (a float whose caption runs at the page's turn open with a table label) owns the turned area from the label on;
+    captionless table parts at that turn are parts of it. Without a label on the page, one table part at that turn is
+    the float. Two labels, or two captionless parts without a label, are not guessed: None."""
+    runs = {e['id']: e for e in p['elements'] if e['kind'] == 'text'}
+    labelled, parts = [], []
+    for f in p.get('floats', []):
+        cap = turned_float_caption_runs(p, f, tables)
+        tids = [b for b in f.get('blocks', []) if b in tables and round(tables[b].get('angle', 0)) % 360 == angle]
+        has_label = any(m in runs and round(runs[m].get('angle', 0)) % 360 == angle
+                        and re.match(r'^Table\s+S?' + TABLE_NUMBER + r'\b', label_fix(runs[m]['text']), re.I) for m in cap)
+        if has_label: labelled.append((f, cap, tids))
+        elif tids: parts.append((f, cap, tids))
+    if len(labelled) == 1:
+        f, cap, tids = labelled[0]
+        fr = frame(angle)
+        labs = [fr(runs[m]['box_px']) for m in cap if m in runs and round(runs[m].get('angle', 0)) % 360 == angle
+                and re.match(r'^Table\s+S?' + TABLE_NUMBER + r'\b', label_fix(runs[m]['text']), re.I)]
+        return dict(caption=sorted(cap), table=tids[0] if tids else None, label_line=labs[0][1:4:2] if labs else None,
+                    merge=[t for _, _, ts in parts for t in ts] + tids[1:])
+    if not labelled and len(parts) == 1 and len(parts[0][2]) == 1:
+        f, cap, tids = parts[0]
+        return dict(caption=sorted(cap), table=tids[0], merge=[])
+    return None
+
+
+def extend_turned_float(p, source_page):
+    """F18 (lane r5-turned): the second reading of a turned float page. The turned lines the first reading left
+    outside, and the captionless table parts at the page's turn, join the float of the page's table label (or of its
+    one table part) as one part: all its lines kept together, as printed lines when parts are joined or a part is
+    made, in turned reading order, under the label, at the page. Rows and cells are not rebuilt."""
+    plan = source_page.get('_turned_float_runs')
+    if not plan: return
+    runs = {e['id']: e for e in p['elements'] if e['kind'] == 'text'}
+    tables = {t['id']: t for t in p.get('tables', [])}
+    cap = set(plan['caption'])
+    f = next((f for f in p.get('floats', []) if turned_float_caption_runs(p, f, tables) == cap), None)
+    if f is None: return
+    merge = [tables[t] for t in plan['merge'] if t in tables]
+    ids = [m for m in plan['ids'] if m in runs and m not in cap]
+    title = [m for m in plan.get('title', []) if m in runs and m not in cap]
+    if title:
+        f['_caption_ids'] = sorted(cap) + title
+        f['caption'] = label_fix(' '.join(e['text'] for row in text_rows([runs[m] for m in f['_caption_ids'] if m in runs]) for e in row))
+    t = tables.get(plan['table']) if plan['table'] else None
+    joined = bool(merge) or t is None
+    members = list(t['members']) if t else []
+    for x in [ids] + [m['members'] for m in merge]:
+        members += [m for m in x if m not in members and m not in cap]
+    if not members or not (ids or merge): return
+    if t is None:
+        t = dict(id='copy:turned:' + sorted(cap)[0] if cap else 'copy:turned', angle=plan['angle'])
+        p.setdefault('tables', []).append(t); f['blocks'] = list(f['blocks']) + [t['id']]
+    t.update(members=members, box_px=hull(runs[m]['box_px'] for m in members if m in runs))
+    if joined: t.update(_copy_exact=True, layout='unstructured', _copy_printed_lines=True)
+    gone = {m['id'] for m in merge}
+    if gone:
+        p['tables'] = [x for x in p['tables'] if x['id'] not in gone]
+        for g in list(p.get('floats', [])):
+            if g is f or not gone & set(g.get('blocks', [])): continue
+            g['blocks'] = [b for b in g['blocks'] if b not in gone]
+            if not any(b in {x['id'] for x in p['tables']} for b in g['blocks']) and not turned_float_caption_runs(p, g, tables):
+                p['floats'].remove(g)
+
+
+def turned_float_leftovers(p, source_page, side, tables, body):
+    """F18 (lane r5-turned): after each reading, record the turned side texts of a turned float page
+    (source_page['_turned_float_left']: their boxes) and the plan for a second reading
+    (source_page['_turned_float_offer']: the float of the page's table label, the captionless table parts at the
+    page's turn and the left-out turned runs; the caption zone is the label's own block only). The paper reading
+    decides after all its readings: it reads the page again with that plan (extend_turned_float); turned text that
+    still stays outside is the output check's finding, one doubt entry for the page (rule F18)."""
+    source_page.pop('_turned_float_left', None); source_page.pop('_turned_float_offer', None)
+    angle = turned_page_angle(p)
+    if angle is None: return
+    # a standalone continuation mark ("(Continued)") is left to the flow cleanup, which drops it as furniture
+    left = [t for t in side if isinstance(t, TurnedSide) and t.angle == angle
+            and not re.fullmatch(r'\(?\s*Contin(?:ues?|ued)\s*\)?', ' '.join(map(str, t)).strip(), re.I)]
+    if not left: return
+    source_page['_turned_float_left'] = [list(t.box) for t in left]
+    plan = turned_float_plan(p, angle, tables)
+    if plan is None: return
+    # a group on the label's own turned line, after the label, is the label's title (F1: label and title tied by one
+    # line): it joins the caption, not the rows
+    fr = frame(angle); line = plan.pop('label_line', None); title, ids = [], []
+    for t in left:
+        b = fr(t.box)
+        on_line = line and min(b[3], line[1]) - max(b[1], line[0]) > .5 * min(b[3] - b[1], line[1] - line[0])
+        (title if on_line else ids).extend(m for m in t.ids if m not in plan['caption'])
+    if ids or title: source_page['_turned_float_offer'] = dict(plan, ids=ids, title=title, angle=angle)
+
+
+def turned_side_text(side_runs):
+    """F17: a rotated area is turned upright before the other rules apply. Turned upright, a turned group no body rule
+    placed (a turned table's note lines run over to the next page, a chart's turned axis title, a turned margin notice)
+    is not on the upright page's body grid, so it never continues an upright body block such as a reference entry.
+    True when most of the group's characters lie in runs set at a turn (angle not 0 modulo 360)."""
+    def n(e): return len(re.sub(r'\s', '', e.get('text', '')))
+    total = sum(n(e) for e in side_runs)
+    turned = sum(n(e) for e in side_runs if round(e.get('angle', 0)) % 360)
+    return total > 0 and 2 * turned > total
 
 
 def end_address_note(lines):
@@ -14034,6 +17823,8 @@ def paragraph_blocks(block, body):
             if carried: block['faces'][i]=block['faces'][i-1]
     lines = block["lines"]; lefts = block["lefts"]
     if not lines: return []
+    if block['meta'].get('r7_heading'):   # lane r7-edges: a released heading is one heading, all its rows
+        return [dict(block, meta=dict(block['meta'], lines=len(lines)))]
     lo = min(lefts); starts = [0]; list_exits=set()
     emphasis=block.get('emphasis',[])
     font_heads=set()
@@ -14230,6 +18021,66 @@ def front_page_index(pages, au):
     return next((i for i, p in enumerate(pages) if p.get('page', 1) == au.get('page', 1)), 0)
 
 
+def unknown_form_markers(pages, au):
+    """Round 6 rules A11 and A20 (first written by lane r4-symboladdr): rule 8's letter markers of unknown form. A
+    single lower-case letter marker is one when, on the byline, its glyph comes from another font than the letter
+    before it (the name's) and the font check rejected its shape match there (font_subs status "rejected": a double
+    bar in a sign font coded as "i"). Returns {letter: [(run id, offset)]}, every front-page occurrence of that
+    font's code with a rejected match, recorded before the copy's own font check runs."""
+    front = next((p for p in pages if p['page'] == au.get('page', 1)), None)
+    if front is None: return {}
+    letters = {m for a in au.get('authors', []) for m in a.get('markers', [])
+               if len(m) == 1 and m.isalpha() and m.islower()}
+    if not letters: return {}
+    byline = set(au.get('author_run_ids', [])) | {m for line in au.get('byline_lines', []) for m in line.get('run_ids', [])}
+    runs = [e for e in front['elements'] if e['kind'] == 'text']
+    def font_at(e, k):
+        return next((sp['font'] for sp in e.get('font_spans', []) if sp['start'] <= k < sp['end']), None)
+    codes = {}
+    for e in runs:
+        if e['id'] not in byline: continue
+        for sub in e.get('font_subs', []):
+            k = sub.get('offset'); m = sub.get('before')
+            if m not in letters or sub.get('status') != 'rejected' or not isinstance(k, int) or not 0 <= k < len(e['text']): continue
+            prior = next((j for j in range(k-1, -1, -1) if e['text'][j].isalpha()), None)
+            if prior is None or font_at(e, prior) in (None, sub.get('font')): continue
+            codes.setdefault(m, set()).add((sub.get('font'), sub.get('source_code')))
+    return {m: [(e['id'], sub['offset']) for e in runs for sub in e.get('font_subs', [])
+                if sub.get('before') == m and sub.get('status') == 'rejected' and isinstance(sub.get('offset'), int)
+                and (sub.get('font'), sub.get('source_code')) in fc]
+            for m, fc in codes.items()}
+
+
+def resolve_unknown_markers(pages, au, pending, uncertain):
+    """Round 6 rule A20 (part of A11; first written by lane r4-symboladdr): a marker of unknown form
+    (unknown_form_markers) is printed as the sign the copy's own font check accepted at every occurrence of its code
+    on the front page, the same sign in each; otherwise as U+FFFD with a flag. Never as the code's letter."""
+    import unicodedata
+    if not pending: return
+    front = au.get('page', 1)
+    runs = {e['id']: e for p in pages if p['page'] == front for e in p['elements'] if e['kind'] == 'text'}
+    taken = {m for a in au.get('authors', []) for m in a.get('markers', []) + a.get('notes', [])}
+    for m, occurrences in pending.items():
+        seen = {runs[r]['text'][k] if r in runs and 0 <= k < len(runs[r]['text']) else None for r, k in occurrences}
+        sign = next(iter(seen)) if len(seen) == 1 else None
+        if (not sign or sign == m or sign == '\ufffd' or unicodedata.category(sign)[0] not in 'PS' or sign in taken):
+            sign = '\ufffd'
+            uncertain.append(f"page {front}: affiliation marker of unknown form (a sign-font glyph coded as the letter "
+                             f"\"{m}\", shape not read) printed as \ufffd; check the printed marker")
+        for a in au.get('authors', []):
+            for key in ('markers', 'notes'):
+                a[key] = [sign if x == m else x for x in a.get(key, [])]
+        for aff in au.get('affiliations', []):
+            if aff.get('marker') == m: aff['marker'] = sign
+        checks = au.get('checks', {})
+        if m in checks.get('markers_used', []): checks['markers_used'] = [sign if x == m else x for x in checks['markers_used']]
+    # rule A12: the list keeps the usual mark order with the sign in its place (rule 8 ordered it by the letter)
+    rank = {ch: 0x2020 + k for k, ch in enumerate("†‡§‖¶#")}
+    if au.get('affiliations') and all(a.get('marker') for a in au['affiliations']) and \
+            len({a.get('page', front) for a in au['affiliations']}) == 1:
+        au['affiliations'].sort(key=lambda a: (len(a['marker']), rank.get(a['marker'][:1], ord(a['marker'][:1])), a['marker']))
+
+
 def printed_front_matter(pages, au):
     """Retain source rows independently of author parsing, and own late address panels.
 
@@ -14301,7 +18152,8 @@ def printed_front_matter(pages, au):
         for block in first.get('blocks', []):
             if not byline.intersection(block['members']): continue
             rows = text_rows([runs[m] for m in block['members'] if m in runs])
-            last = max(i for i, row in enumerate(rows) if any(e['id'] in byline for e in row))
+            last = max((i for i, row in enumerate(rows) if any(e['id'] in byline for e in row)), default=None)
+            if last is None: continue   # rule C5: the block's byline runs are not readable text rows here
             recovered = []; bottom = max(e['box_px'][3] for e in rows[last]); em = None
             for row in rows[last+1:]:
                 text = ' '.join(e['text'].strip() for e in row)
@@ -14348,7 +18200,8 @@ def printed_front_matter(pages, au):
     for block in first.get('blocks', []):
         if not byline.intersection(block['members']): continue
         rows = text_rows([runs[m] for m in block['members'] if m in runs])
-        last_author = max(i for i, row in enumerate(rows) if any(e['id'] in byline for e in row))
+        last_author = max((i for i, row in enumerate(rows) if any(e['id'] in byline for e in row)), default=None)
+        if last_author is None: continue   # rule C5 (AV25 crashed here): no readable row of the block holds a byline run
         bottom = max(e['box_px'][3] for e in rows[last_author])
         byline_size = max(e['run_size_px'] for row in rows[:last_author+1] for e in row if e['id'] in byline)
         address_started = False
@@ -14507,7 +18360,8 @@ def printed_front_matter(pages, au):
             # Its opening bounds the signature, even with no vertical gap.
             for i, row in enumerate(all_rows):
                 opening = ' '.join(e['text'] for e in row)
-                if i and re.match(r'^(?:Copyright\b|©|(?:CC\s+)?This is an open.access article\b|Creative Commons\b)', opening, re.I):
+                # (round 6 rule A9: a reference list heading also bounds it; reference entries are never author rows)
+                if i and re.match(r'^(?:Copyright\b|©|(?:CC\s+)?This is an open.access article\b|Creative Commons\b|(?:References|Bibliography)\s*$)', opening, re.I):
                     all_rows = all_rows[:i]
                     mem = [e for line in all_rows for e in line]
                     break
@@ -14912,6 +18766,11 @@ def prepare_front_abstract_panel(page, authors):
         return
 
 
+def J_lines_plain(lines):
+    """the rows of a block as one plain text (for an open-end test)"""
+    return ' '.join(str(x).strip() for x in lines if str(x).strip())
+
+
 def abstract_before_body(blocks, body):
     """A separate abstract column follows its heading before the first body heading.
 
@@ -14932,6 +18791,23 @@ def abstract_before_body(blocks, body):
         combined['meta'] = dict(combined['meta'], box_px=hull(b['meta']['box_px'] for b in side))
         return [combined] + [b for b in blocks if b not in side]
     for head in blocks:
+        # lane r6-abstract (B3, B10, S1): the label may be the first row of the abstract's own block (alone on
+        # that row, prose rows under it). A body heading the flow puts before that block while it is
+        # printed below the abstract's end (a body block under it, two rows or more) moves after the abstract:
+        # abstract text is never printed after body text.
+        if len(head['lines']) >= 3 and compact(head['lines'][0]) in ('abstract', 'summary'):
+            hb = head['meta']['box_px']; at = blocks.index(head)
+            earlier_heading = next((i for i, b in enumerate(blocks[:at]) if b['meta']['box_px'][1] > hb[3]
+                                    and min(b['meta']['box_px'][2], hb[2]) > max(b['meta']['box_px'][0], hb[0])
+                                    and len(b['lines']) >= 2 and not b.get('_abstract')), None)
+            # never between a sentence and its continuation: the body block the abstract goes before must open a
+            # paragraph (a capital, a digit or a quote first), and the block before that place must not end open
+            if earlier_heading is not None:
+                opens = re.match(r'^[\W_]*[A-Z0-9]', str(blocks[earlier_heading]['lines'][0]).strip())
+                prev_open = earlier_heading > 0 and stream_tail_open(J_lines_plain(blocks[earlier_heading - 1]['lines']))
+                if not opens or prev_open: earlier_heading = None
+            if earlier_heading is None: continue
+            return blocks[:earlier_heading] + [head] + [b for b in blocks[earlier_heading:] if b is not head]
         if len(head['lines']) != 1 or compact(head['lines'][0]) not in ('abstract', 'summary'): continue
         hb = head['meta']['box_px']; selected = []; last = hb
         for b in sorted(blocks, key=lambda b: (b['meta']['box_px'][1], b['meta']['box_px'][0])):
@@ -15115,24 +18991,258 @@ def exclude_conserved_runs(page, run_ids, reason):
     page['_conservation_runs'] = [e for e in page.get('_conservation_runs', []) if e['id'] not in set(run_ids)]
 
 
+def slice_part(pt, i0, i1):
+    """Lane r6-abstract: rows i0..i1 of a paragraph part (from paragraph_blocks), with its per-row lists."""
+    d = dict(pt)
+    n = len(pt['lines'])
+    for key in ("lines", "lefts", "sizes", "row_boxes", "emphasis", "faces", "prefixes"):
+        if isinstance(pt.get(key), list) and len(pt[key]) == n: d[key] = pt[key][i0:i1]
+    d['first'] = d['lines'][0] if d['lines'] else ''
+    rb = d.get('row_boxes') or []
+    if rb and len(rb) == len(d['lines']):
+        d['meta'] = dict(pt['meta'], box_px=list(hull(rb)), lines=len(d['lines']))
+    return d
+
+
+def emit_keyword_record(items, tail, page, body, J):
+    """Lane r6-abstract (B4, B11): the keyword record cut off an abstract paragraph. The list ends at a row that opens
+    another labelled record ("Citation: ..."; a colon with a space after it, under a row that does not leave the list
+    open with a comma or semicolon) or where a new sentence opens after a closed row. A labelled box under it
+    (Clinical relevance, What is known ...) is its own heading and items; any other rows after the list are side text
+    kept at their page position, never joined to the list."""
+    rows = tail['lines']
+    end = len(rows)
+    for j in range(1, len(rows)):
+        row, prev = str(rows[j]).strip(), str(rows[j-1]).rstrip()
+        if re.search(r'[,;]$', prev): continue          # the list goes on
+        if (re.match(r'^[A-Z][A-Za-z]*(?:\s+[A-Za-z]+){0,3}\s*:\s+\S', row) or OTHER_BOX_LABEL.fullmatch(row)
+                or re.match(r'^[A-Z]', row) and re.search(r'\.$', prev)
+                and not (j == 1 and KEYWORDS_ROW.fullmatch(str(rows[0]).strip()))):
+            end = j; break
+    box = tail['meta']['box_px']
+    items.append(dict(kind='para', text=J.lines(rows[:end]), page=page, keywords_split=True, barrier=True,
+                      box=box, flow_parts=[(page, box)], flow_start=None, flow_end=None))
+    if end >= len(rows): return
+    rest = rows[end:]
+    if not OTHER_BOX_LABEL.fullmatch(str(rest[0]).strip()):
+        items.append(dict(kind='side', text=J.lines(rest), page=page)); return
+    items.append(dict(kind='heading', text=rest[0], page=page))
+    sb = slice_part(tail, end + 1, len(rows))
+    if not sb['lines']: return
+    # an item ends at a closed row that stops short of the box's right edge (two em or more) before a capital
+    rb = sb.get('row_boxes') or []
+    right = max((r[2] for r in rb), default=0)
+    groups = []
+    for j, row in enumerate(sb['lines']):
+        if (groups and j < len(rb) and re.search(r'[.!?]\s*$', str(sb['lines'][j-1]))
+                and rb[j-1][2] < right - 2 * body and re.match(r'^[A-Z]', str(row).strip())):
+            groups.append([row])
+        elif groups: groups[-1].append(row)
+        else: groups.append([row])
+    for gi, g in enumerate(groups):
+        # the last is an ordinary paragraph: when the box runs on in the next column, the two pieces join
+        items.append(dict(kind='para', text=J.lines(g), page=page, barrier=gi < len(groups) - 1,
+                          box=box, flow_parts=[(page, box)], flow_start=None, flow_end=None))
+
+
+def runin_labelled_abstract(text):
+    """Lane r6-abstract (B2): a text that opens with a run-in label and holds two or more distinct run-in labels at
+    sentence starts, one of them a methods, results or conclusion part (\"Study aim: ... Methods: ... Results: ...\")."""
+    text = str(text)
+    heads = re.findall(r'(?:^|(?<=[.!?])\s+)([A-Z][A-Za-z/-]*(?:\s+[A-Za-z/-]+){0,3})\s*:\s', text)
+    return bool(re.match(r'^[A-Z][A-Za-z/-]*(?:\s+[A-Za-z/-]+){0,3}\s*:\s', text) and len({h.lower() for h in heads}) >= 2
+                and any(re.fullmatch(r'(?:Materials?(?: and Methods)?|Methods?|Methodology|Results|Findings|Conclusions?)', h, re.I)
+                        for h in heads))
+
+
+# Lane r6-artinfo, rules I6/I10 (memo artinfo-2): a citation line is a journal name, a year, a volume and pages
+CITATION_FORM = re.compile(r"[A-Z][^©\ufffd;]{1,80}?\b(?:19|20)\d{2}\s*[;,]\s*\d+\s*(?:\(\s*[\w-]+\s*\))?\s*[:,]\s*[A-Za-z]?\d+"
+                           r"(?:\s*[–-]\s*[A-Za-z]?\d+)?\.?")
+COPYRIGHT_SIGN = re.compile(r"\bCopyright\s*:?\s*[©\ufffd]|©")   # an unread mark counts as the sign only after the word
+
+
+def sign_citation(text):
+    """Memo artinfo-2 (I10 removes the copyright record only): where the text right after a copyright sign has
+    the citation form of rule I6 (CITATION_FORM: journal name, year, volume, pages), that citation is no part
+    of the notice. Returns (where the sign starts, the citation, the text after it) for the first such sign,
+    else None."""
+    t = str(text)
+    for m in COPYRIGHT_SIGN.finditer(t):
+        tail = t[m.end():]
+        c = CITATION_FORM.match(tail.lstrip())
+        if c: return m.start(), c.group(0).strip(), tail.lstrip()[c.end():]
+    return None
+
+
 def clean_article_info(text):
     # Copyright/license notices and standalone journal footer citations are page furniture.
-    text = re.split(r"(?:\b(?:CC )?This is an open[ -]access article|\bCopyright\s*©|^©)", text, maxsplit=1)[0].strip()
+    # lane r6-artinfo (memo artinfo-2): a citation after the copyright sign stays; only the sign (and a rights
+    # sentence after the citation) goes, and the text before the sign is cleaned as before
+    sc = sign_citation(text)
+    if sc:
+        head = clean_article_info(re.sub(r"\bCopyright\s*:?\s*$", "", text[:sc[0]]).strip()) if text[:sc[0]].strip() else ""
+        rest = sc[2].strip()
+        rest = "" if re.fullmatch(r"(?:All rights reserved\.?)?", rest, re.I) else clean_article_info(rest)
+        return " ".join(x for x in (head, sc[1], rest) if x)
+    # lane r6-artinfo (I10): a "Copyright:" label before the sign (or before its unread mark) opens the notice too
+    text = re.split(r"(?:\b(?:CC )?This is an open[ -]access article|\bCopyright\s*:?\s*[©\ufffd]|^©)", text, maxsplit=1)[0].strip()
     if re.match(r"^(?:\d+\s*[|]?\s*)?(?:©|(?:https?://)?[\w.-]+\.[a-z]{2,}/(?:journal|home)\b)", text, re.I): return ""
     if re.fullmatch(r"[^;]{3,90}\b(?:19|20)\d{2};\d+.{0,60}\.?", text): return ""
     return text
 
 
-def article_doi_lines(page):
+# Lane r6-artinfo, rule I2: the opening words of the article-information records (and of the licence
+# record, I10), as printed at the start of a row. A mark (*, a dagger) may stand before a contact label.
+INFO_LABEL = re.compile(
+    r"^\s*(?:[*†‡§¶]\s*)?(?:Citation|(?:Academic\s+|Handling\s+)?Editors?|Received|Revised|Accepted|Published(?:\s+online)?(?=\s*(?::|\d|[A-Z][a-z]+\s+\d))|"
+    r"Article\s+history|Copyright|©|Funding|Financial\s+(?:support|disclosure)|Competing\s+interests?|"
+    r"Conflicts?\s+of\s+interests?|Declarations?\s+of\s+interests?|Disclosures?|Correspondence|Corresponding\s+author|"
+    r"E-?mail|Key\s*words|Keywords|DOI|How\s+to\s+cite|Please\s+cite|Cite\s+this\s+article|Data\s+availability|"
+    r"(?:CC\s+)?This\s+is\s+an\s+open[ -]access\s+article)(?!\w)", re.I)
+LICENCE_RECORD = re.compile(r"^\s*(?:Copyright\b|©|(?:CC\s+)?This\s+is\s+an\s+open[ -]access\s+article\b)", re.I)
+SHORT_LABEL = re.compile(r"^\s*[A-Z][\w’'-]*(?:\s+[\w’'&-]+){0,3}\s*:(?:\s|$)")
+
+
+def cut_records(info_rows, joined, explicit_rows):
+    """Rules I3, I4 and I10 (lane r6-artinfo): cut article-information records at their labels before
+    the licence cleanup. A record (its printed rows) that clean_article_info would cut short (it keeps
+    only the text before a licence or copyright opening), or that holds a later row opening with a
+    copyright or licence label, is cut at every later printed row that opens with a label: an
+    article-information label (INFO_LABEL) or a short label of its own (up to four words, a capital
+    first, then a colon: SHORT_LABEL). Each piece is then its own record. A piece that opens with a
+    copyright or licence label is the licence record (I10) and is removed whole; the pieces before and
+    after it (citation, dates, funding, competing interests, the e-mail) are kept. A record the cleanup
+    leaves whole and that holds no later licence row, or with no licence piece among its label rows,
+    is unchanged. A label opens with a capital: a statement's wrapped row that happens to open with a
+    label word in lower case is no label.
+    `joined(rows)` gives the record's text as the caller cleans it. Returns (rows, licence pieces)."""
+    out, licence = [], []
+    capital = lambda line: not re.match(r'^\s*(?:[*†‡§¶]\s*)?[a-z]', str(line))
+    for txt in info_rows:
+        if any(txt == x for x in explicit_rows) or len(txt) < 2:
+            out.append(txt); continue
+        raw = joined(txt)
+        kept = clean_article_info(raw).lstrip("| ").strip()
+        later_licence = any(i and LICENCE_RECORD.match(str(line)) and capital(line) for i, line in enumerate(txt))
+        if compact(kept) == compact(raw) and not later_licence:
+            out.append(txt); continue
+        starts = [i for i, line in enumerate(txt) if i and capital(line)
+                  and (INFO_LABEL.match(str(line)) or SHORT_LABEL.match(str(line)))]
+        if not starts:
+            out.append(txt); continue
+        pieces = [txt[a:b] for a, b in zip([0] + starts, starts + [len(txt)])]
+        if not any(LICENCE_RECORD.match(str(p[0])) for p in pieces):
+            out.append(txt); continue
+        for p in pieces:
+            out.append(p)
+            if LICENCE_RECORD.match(str(p[0])): licence.append(p)
+    return out, licence
+
+
+def unlabelled_lowercase_entry(flat):
+    """Rule I5 (lane r6-artinfo): an article-information entry that opens with an ordinary lowercase word
+    (the shared boundary_resumes) and carries no label: no colon within its first five words, not an
+    address, a DOI or a web address, and not a marker letter or number set before a capital (an author
+    note's "a Professor ..."). Such an entry is not article information."""
+    t = str(flat).strip()
+    if not stream_resume(t) or len(t.split()) < 3: return False
+    if re.match(r'^[a-z]\s+[A-Z]', t): return False
+    if re.match(r'^(?:https?:|www\.|doi\b|e-?mail\b|\S+@\S+)', t, re.I): return False
+    # memo artinfo-1 (M2): a record of the contact kind stays a record, whatever the case of its first word:
+    # it opens with a word naming that kind, or it holds an address after an e-mail label
+    if CONTACT_OPENING.match(t) or re.search(r'\be-?mail(?:\s+address(?:es)?)?\s*:?\s*[\w.+-]+@[\w-]+\.', t, re.I): return False
+    return ':' not in ' '.join(t.split()[:5])
+
+
+CONTACT_OPENING = re.compile(r'^(?:address(?:es)?\b|correspond\w*|reprints?\b|requests?\s+for\s+reprints|contact\b)', re.I)
+
+
+def keyword_term_list(text):
+    """Memo artinfo-1 (M1): the list printed under a keyword label standing alone on its row: terms split by
+    commas or semicolons, no closing stop, no sentence end inside, at most forty words."""
+    t = str(text).strip()
+    return (bool(re.search(r'[,;]', t)) and not t.endswith('.') and len(t.split()) <= 40
+            and not re.search(r'[a-z]{2}[.!?]\s+[A-Z]', t))
+
+
+def rows_box(rows, page):
+    """The hull of the printed runs the trace rows of `rows` came from on `page` (a zero box when none)."""
+    runs = {e['id']: e for e in page.get('elements', []) if e.get('kind') == 'text'}
+    boxes = [runs[m]['box_px'] for line in rows for r, a, b in trace_segs([line]) if _TRACE['rows'][r]['page'] == page.get('page')
+             for m in _TRACE['rows'][r]['runs'] if m in runs]
+    return list(hull(boxes)) if boxes else [0, 0, 0, 0]
+
+
+def licence_continuations(info_rows, page):
+    """Rules I3 and I10 (lane r6-artinfo): a record ends at the next label, a gap or a change of type. A
+    record with no label of its own whose rows stand directly under a licence or copyright record (its
+    top within half a row height of that record's last row, sharing its x range, in the same size within
+    6 per cent) is that record's continuation row and is left out with it (a copyright notice of two
+    rows that the page set as two lines). Returns those records."""
+    runs = {e['id']: e for e in page.get('elements', []) if e.get('kind') == 'text'}
+    def last_row(rows):
+        out = []
+        for r, a, b in trace_segs(rows[-1:]):
+            if _TRACE['rows'][r]['page'] == page.get('page'): out += [runs[m] for m in _TRACE['rows'][r]['runs'] if m in runs]
+        return out
+    def first_row(rows):
+        out = []
+        for r, a, b in trace_segs(rows[:1]):
+            if _TRACE['rows'][r]['page'] == page.get('page'): out += [runs[m] for m in _TRACE['rows'][r]['runs'] if m in runs]
+        return out
+    size = lambda es: statistics.median(e.get('run_size_px', e['size_px']) for e in es)
+    found = []
+    for a in info_rows:
+        if not a or not LICENCE_RECORD.match(str(a[0])): continue
+        la = last_row(a)
+        if not la: continue
+        ba = hull(e['box_px'] for e in la)
+        for b in info_rows:
+            if b is a or not b or INFO_LABEL.match(str(b[0])) or SHORT_LABEL.match(str(b[0])) or LICENCE_RECORD.match(str(b[0])): continue
+            if CITATION_FORM.match(str(b[0]).strip()): continue   # memo artinfo-2: a citation row is no part of the notice
+            fb = first_row(b)
+            if not fb: continue
+            bb = hull(e['box_px'] for e in fb); h = ba[3] - ba[1]
+            if (0 <= bb[1] - ba[3] <= .5 * h and min(ba[2], bb[2]) - max(ba[0], bb[0]) > 0
+                    and abs(size(fb) - size(la)) <= .06 * size(la) and not any(b is x for x in found)):
+                found.append(b)
+    return found
+
+
+def join_broken_identifiers(flat, rows):
+    """Rule I7 (lane r6-artinfo): a DOI or an e-mail address broken at a printed row end is joined with no
+    space; no character is added or dropped. A row ends inside a DOI when its last word holds "10.", digits,
+    a slash and a code that ends in a period, hyphen, slash or underscore, and the next row is one word of
+    DOI characters holding a digit. A row ends inside an address when its last word is an address cut at
+    "@", a period or a hyphen, and the next row is one word of domain characters. Only a join that occurs
+    once in the record's text is made."""
+    text = str(flat)
+    for a, b in zip(rows, rows[1:]):
+        a, b = str(a).rstrip(), str(b).strip()
+        if not a or not b or ' ' in b: continue
+        last = a.split()[-1]
+        doi = re.search(r'10\.\d{4,9}/\S*[./_-]$', last) and re.fullmatch(r'[\w./()-]*\d[\w./()-]*', b)
+        mail = (re.fullmatch(r'[\w.+-]+@(?:[\w-]+\.)*[\w-]*', last.rstrip('.-')) and last.endswith(('@', '.', '-'))
+                and re.fullmatch(r'[\w-]+(?:\.[\w-]+)*[.,;]?', b))
+        if not (doi or mail): continue
+        old = last + ' ' + b
+        if text.count(old) == 1: text = text.replace(old, last + b)
+    return flat if text == str(flat) else text
+
+
+def article_doi_lines(page, other_forms=False):
     """Page-one DOI records survive furniture filtering, but body citations do not.
 
     Explicit DOI labels can occur anywhere on page one. Bare identifiers must be
     in a header/footer band (or the outer 15% of the page). Only upright text is
     eligible; a publisher's rotated download notice is not article information.
+    other_forms=True (lane r6-artinfo, I6/I9) returns only the DOI records of the other printed forms
+    below, which the caller adds last and prints only where the front holds that DOI nowhere else.
     """
     _, top, _, bottom = page['region_box_px']
     height = bottom - top
     result = []
+    dropped = {m for f in (page.get('main_text') or {}).get('furniture', []) for m in f.get('members', [])}
     for row in text_rows([e for e in page['elements'] if e['kind'] == 'text' and e.get('angle', 0) == 0]):
         for i, e in enumerate(row):
             text = e['text'].strip()
@@ -15144,7 +19254,14 @@ def article_doi_lines(page):
             labelled = re.fullmatch(r'DOI\s*:\s*10\.\d{4,9}/\S+', text, re.I)
             box = e['box_px']
             band = e.get('band') in ('header', 'footer') or box[3] <= top+.15*height or box[1] >= bottom-.15*height
-            if labelled or band and re.fullmatch(r'10\.\d{4,9}/\S+', text):
+            # Lane r6-artinfo, rules I6/I9: the page-one DOI in a band that the page reading dropped as
+            # furniture is kept once from page one also in its other printed forms, a "DOI" label without
+            # a colon and the resolver address (I6: "10." then digits, a slash and a code); a run printed
+            # elsewhere is never taken, and the caller prints it only where the front holds it nowhere else.
+            other = (band and e.get('id') in dropped and
+                     re.fullmatch(r'(?:DOI\s*:?\s*|https?://(?:dx\.)?doi\.org/)10\.\d{4,9}/\S+', text, re.I))
+            old_form = labelled or band and re.fullmatch(r'10\.\d{4,9}/\S+', text)
+            if (other and not old_form) if other_forms else old_form:
                 result.append([trace_row(page.get('page'), row[i:i+2] if text != e['text'].strip() else [e], text)])
     return result
 
@@ -15631,8 +19748,26 @@ def place_front_resume(items, held, page_no, body):
             stream_tail_open(it['text']) and boundary_witness(it['text'], held['text'])['verdict'] == 'continuation']
     if len(hits) > 1:
         b = held['box']
-        hits = [k for k in hits if (lambda x: x and x_overlap(x, b) > .5 and 0 <= b[1]-x[3] <= 3*body)(
-            items[k].get('flow_last_box', items[k].get('box')))]
+        last = {k: items[k].get('flow_last_box', items[k].get('box')) for k in hits}
+        above = [k for k in hits if (lambda x: x and x_overlap(x, b) > .5 and 0 <= b[1]-x[3] <= 3*body)(last[k])]
+        if not above:
+            # Lane r6-artinfo, rule I5 (prior art: round-4 diagnosis G6): held rows that top a column
+            # continue the paragraph that ends at the foot of the column directly to their left, the
+            # one before them in column reading order: its last part stands wholly left of the rows
+            # and reaches lower than their top; of several, the nearest column (rightmost last part).
+            left = [k for k in hits if last[k] and last[k][2] <= b[0] and last[k][3] > b[1]]
+            if not left:
+                # lane r6-abstract (S10): a sentence open at a column foot continues at the top of the next column.
+                # The held rows top a column (they start above the paragraph's last row) to the right of the
+                # paragraph's last part; of such paragraphs, the one whose last part ends in the column directly
+                # left of the held rows (the rightmost) is continued, when it is the only one there.
+                # integ-r6: both lanes wrote this test; the wholly-left form (I5) is tried first, the
+                # form that allows one em of overlap (S10) where it finds none.
+                left = [k for k in hits if last[k] and b[0] >= last[k][2] - body and b[1] < last[k][3]]
+            if left:
+                edge = max(last[k][2] for k in left)
+                above = [k for k in left if last[k][2] >= edge - body]
+        hits = above
     return hits[0] if len(hits) == 1 else None
 
 
@@ -15990,6 +20125,18 @@ def later_column_on_page(x, page_text_blocks, extents, body):
                for B in page_text_blocks.get(a[0], []))
 
 
+def float_between_pieces(it, nxt, float_boxes, body):
+    """F23: a float box (FLOAT_BOXES: page -> boxes of the non-body items) stands between body piece IT and the
+    next piece NXT on the page: under IT's last part in its column, or over NXT's first part in its column."""
+    xb = it.get('flow_last_box', it.get('box')); yb = nxt.get('box')
+    last = max(it.get('pages', {it['page']}))
+    for b in float_boxes.get(nxt.get('page'), []):
+        if yb and b[3] <= yb[1] + .5*body and min(b[2], yb[2]) - max(b[0], yb[0]) > 0: return True
+    for b in float_boxes.get(last, []):
+        if xb and b[1] >= xb[3] - .5*body and min(b[2], xb[2]) - max(b[0], xb[0]) > 0: return True
+    return False
+
+
 def rejoin_paragraphs(items, J, body=None, front_page=1, page_text_blocks=None):
     """Finish body paragraphs before float anchoring, carrying notes beyond the whole paragraph.
 
@@ -16057,6 +20204,16 @@ def rejoin_paragraphs(items, J, body=None, front_page=1, page_text_blocks=None):
                 witness = boundary_witness(it['text'], nxt.get('text',''), layout)
                 bracket = witness['reason'].startswith('unclosed bracket')
                 unfinished = witness['verdict'] == 'continuation' or witness['verdict'] == 'layout' and witness['unterminated']
+                # F23 (round 5): body text goes around a float; the sentence open before the float continues after
+                # it. A piece ending in a decimal number ("varied between 6.6") leaves its sentence open: the point
+                # sits between two digits and is no stop (the terminal test reads it as a stop and a raised
+                # citation). Where a float stands between the two pieces on the page (under the first piece in its
+                # column, or over the next one in its column) and the layout witnesses the column turn, the pieces
+                # join whether or not the first is a list item; the float then follows the finished paragraph.
+                if (witness['verdict'] == 'layout' and not witness['unterminated'] and
+                        re.search(r'\d[.,]\d+$', str(it['text']).strip()) and
+                        float_between_pieces(it, nxt, float_boxes, body or 16.0)):
+                    unfinished = True
                 # Lane r2-frontfusion: a piece ending in a closed web address (an 'http(s)://' or 'www.' address not
                 # ending in / . _ -) at a column or page foot. A next piece opening in lower case or with an opening
                 # bracket ('(accessed ...)') is a text witness of the sentence going on: the ordinary decision stands.
@@ -16360,6 +20517,7 @@ def float_part_objects(it, part, page):
     for namespace,es in [('elements',page['elements']),('art',page.get('art',[]))]:
         for e in es:
             b=e.get('box_px');ident=e.get('id');claimed=namespace=='elements' and (ident in roles or ident in owned)
+            if namespace=='elements' and ident in it.get('_ground_ids',()):continue   # F28: the page's ground is no float object
             if not float_intersects(box,b) and not claimed:continue
             raw_box=b
             if e['kind']=='image':b=float_image_boxes(page).get(tuple(b),b)
@@ -16648,6 +20806,150 @@ def scan_float_items(stream, pages):
     return result
 
 
+_NOCAPTION_PENDING=[]
+
+
+def doubt_list():
+    """The shared doubt list (doubts.py at the tree root, round 5; never edited here). The one loader of the combined
+    program (candidate-r5): every lane adds to this one module; main() resets it once and writes it once."""
+    import importlib.util
+    mod=sys.modules.get('_copy_doubts')
+    if mod is None:
+        spec=importlib.util.spec_from_file_location('_copy_doubts',os.path.join(os.path.dirname(os.path.abspath(__file__)),'doubts.py'))
+        mod=importlib.util.module_from_spec(spec);sys.modules['_copy_doubts']=mod;spec.loader.exec_module(mod)
+    return mod
+
+
+# The lanes' own names for the one loader (their tests call them); each is the same function, not a second loader.
+nocaption_doubts = doubt_list   # lane r5-nocaption
+_doubt_list = doubt_list        # lane r5-captionside
+doubts_list = doubt_list        # lane r5-formula
+_doubts = doubt_list            # lane r5-signs
+doubts_module = doubt_list      # lane r5-floatspace
+
+
+def nocaption_inside(box, e):
+    """a text run whose centre lies inside the box"""
+    b=e['box_px'];cx,cy=(b[0]+b[2])/2,(b[1]+b[3])/2
+    return box[0]-1<=cx<=box[2]+1 and box[1]-1<=cy<=box[3]+1
+
+
+def nocaption_text_frame(p, b):
+    """A drawn group that holds text more than drawing (a shaded text box, a highlight behind text, the rules of a
+    table) is a frame for its text, not a picture: no image covers half of it, and text runs cover a quarter of it or
+    more, or forty or more text runs lie in it (a ruled grid of cells)."""
+    area=max(1.0,(b[2]-b[0])*(b[3]-b[1]))
+    runs=[e for e in p['elements'] if e['kind']=='text' and nocaption_inside(b,e)]
+    text=sum(overlap_area(b,e['box_px']) for e in runs)
+    image=sum(overlap_area(b,e['box_px']) for e in p['elements'] if e['kind']=='image')
+    return image<.5*area and (text>=.25*area or len(runs)>=40)
+
+
+_NOCAPTION_PDF=[None]
+_NOCAPTION_IMAGE_KEYS={}
+
+
+def nocaption_image_keys(pdf, dpi=150):
+    """Per page, the images the PDF draws: (box in page pixels, key). The key is the sha256 of the image stream's
+    raw bytes with its pixel size: two draws with one key are the same picture, whatever their place."""
+    if not pdf:return {}
+    if (pdf,dpi) in _NOCAPTION_IMAGE_KEYS:return _NOCAPTION_IMAGE_KEYS[pdf,dpi]
+    found={}
+    try:
+        reader=scan_reader()
+        import pdfplumber
+        with pdfplumber.open(pdf) as doc:
+            for n,page in enumerate(doc.pages,1):
+                shift=reader.plumber_shift_px(pdf,n,page)*dpi/reader.PARAMS['dpi']
+                out=[]
+                for im in page.images:
+                    try:data=im['stream'].get_rawdata() or b''
+                    except Exception:data=b''
+                    key=hashlib.sha256(data).hexdigest()+':'+str(im.get('srcsize'))
+                    k=dpi/72
+                    out.append(([im['x0']*k,im['top']*k+shift,im['x1']*k,im['bottom']*k+shift],key))
+                found[n]=out
+    except Exception:
+        found={}
+    _NOCAPTION_IMAGE_KEYS[pdf,dpi]=found
+    return found
+
+
+def nocaption_drawn_keys(page_no, b, keys):
+    """the keys of the images drawn within the box (each image inside it, within 3 px)"""
+    return frozenset(k for box,k in keys.get(page_no,[]) if box[0]>=b[0]-3 and box[1]>=b[1]-3 and box[2]<=b[2]+3 and box[3]<=b[3]+3)
+
+
+def nocaption_ground(p, b):
+    """Rule F28 (the page's ground): a drawn object that covers the page (nine tenths of it), or covers half of it
+    and every text run of the page outside the furniture, with the page's text lying over it, is the page's ground,
+    not a float."""
+    W,H=p['region_box_px'][2]-p['region_box_px'][0],p['region_box_px'][3]-p['region_box_px'][1]
+    area=max(0,b[2]-b[0])*max(0,b[3]-b[1])
+    if area<.5*W*H:return False
+    mt=p.get('main_text') or {}
+    furn={m for f in mt.get('furniture',[]) for m in f.get('members',[])}
+    runs=[e for e in p['elements'] if e['kind']=='text' and e['id'] not in furn]
+    inside=[e for e in runs if nocaption_inside(b,e)]
+    if not inside:return False
+    return area>=.9*W*H or len(inside)==len(runs)
+
+
+def nocaption_furniture(p, b, others, body, near):
+    """Rule F28: a small picture at a page edge, or one repeated on several pages, is a logo or badge, not a float.
+
+    At a page edge: on one side of the page's body text (above its first body-type line of the main flow, below its
+    last, or beside all of it) with no text line between the picture and that edge of the page. Small: under 1/40 of
+    the page area. Repeated: the same box (within 3 pt) holds an uncaptioned graphic on another page; a repeated
+    picture is furniture only at a page edge too (two uncaptioned figures of one layout size are not logos). A picture
+    within one body size of a captioned float on its page is a piece of that drawing, never furniture."""
+    W,H=p['region_box_px'][2]-p['region_box_px'][0],p['region_box_px'][3]-p['region_box_px'][1]
+    if any(n and n[0]-body<=b[2] and b[0]<=n[2]+body and n[1]-body<=b[3] and b[1]<=n[3]+body for n in near):return None
+    tol=3*(p.get('params',{}).get('dpi',150))/72
+    repeated=any(all(abs(o[k]-b[k])<=tol for k in range(4)) for o in others)
+    small=(b[2]-b[0])*(b[3]-b[1])<W*H/40
+    if not (repeated or small):return None
+    mt=p.get('main_text') or {}
+    furn={m for f in mt.get('furniture',[]) for m in f.get('members',[])}
+    flow=[x['box_px'] for x in mt.get('blocks',[]) if x.get('cls')=='main' and x.get('order') is not None and
+          abs((x.get('size_px') or 0)-body)<=.05*body]
+    # A page without body-type text (a cover page) measures against its main-flow text of any size.
+    flow=flow or [x['box_px'] for x in mt.get('blocks',[]) if x.get('cls')=='main' and x.get('order') is not None]
+    if not flow:return None
+    texts=[e['box_px'] for e in p['elements'] if e['kind']=='text' and e['id'] not in furn and not nocaption_inside(b,e)]
+    xo=lambda t:min(t[2],b[2])>max(t[0],b[0])
+    yo=lambda t:min(t[3],b[3])>max(t[1],b[1])
+    edge=(b[3]<=min(f[1] for f in flow)+1 and not any(xo(t) and t[3]<=b[1]+1 for t in texts) or
+          b[1]>=max(f[3] for f in flow)-1 and not any(xo(t) and t[1]>=b[3]-1 for t in texts) or
+          b[2]<=min(f[0] for f in flow)+1 and not any(yo(t) and t[2]<=b[0]+1 for t in texts) or
+          b[0]>=max(f[2] for f in flow)-1 and not any(yo(t) and t[0]>=b[2]-1 for t in texts))
+    if not edge:return None
+    return 'F28: picture repeated at one place on several pages' if repeated else 'F28: small picture at a page edge'
+
+
+def nocaption_owner(p, b, local, records_of):
+    """Rule F29 (F9): an uncaptioned picture belongs to the captioned figure whose space holds it: the two lie above,
+    below or beside one another and no main-flow text lies in the rectangle that spans both. The nearest such
+    figure owns it."""
+    mt=p.get('main_text') or {}
+    flow={m for x in mt.get('blocks',[]) if x.get('cls')=='main' and x.get('order') is not None
+          for blk in p.get('blocks',[]) if blk['id']==x['id'] for m in blk['members']}
+    runs=[e for e in p['elements'] if e['kind']=='text' and e['id'] in flow]
+    best=None
+    for part in local:
+        record=records_of(part)
+        if not record or record['kind']!='figure' or not part.get('has_caption') or not part.get('box'):continue
+        if not part.get('has_content'):continue
+        a=part['box']
+        if not (min(a[2],b[2])>max(a[0],b[0]) or min(a[3],b[3])>max(a[1],b[1])):continue
+        span=hull([a,b]);own=set(part.get('caption_run_ids',[]))
+        if any(e['id'] not in own and nocaption_inside(span,e) and not nocaption_inside(a,e) and not nocaption_inside(b,e)
+               for e in runs):continue
+        gap=max(0,a[1]-b[3],b[1]-a[3])+max(0,a[0]-b[2],b[0]-a[2])
+        if best is None or gap<best[0]:best=(gap,record)
+    return best[1] if best else None
+
+
 def gather_floats(items, pages, decisions):
     """One logical record per printed label, plus explicitly unresolved objects.
 
@@ -16655,13 +20957,13 @@ def gather_floats(items, pages, decisions):
     This is an inventory, not a second table parser. The independent rule-4
     unpaired inventory is reconciled by source membership or region coverage.
     """
-    by_page={p['page']:p for p in pages};records={};parts=[];ignored=[]
+    by_page={p['page']:p for p in pages};records={};parts=[];ignored=[];burned=[0]
     decision_by_id={(t['page'],t.get('id')):t for t in decisions}
     def present(caption):
         return bool(caption.strip() and not re.search(r'no caption|caption not recovered',caption,re.I))
     def add(it):
         label=float_label(it.get('caption','')) or it.get('_float_join_label')
-        number=len(parts)+1
+        number=len(parts)+1+burned[0]
         key=label['id'] if label else f"Unlabelled {it['kind']} p{it['page']}-{number}"
         record=records.setdefault(key,dict(id=key,kind=label['kind'] if label else it['kind'],
             caption='',captions=[],notes=[],parts=[]))
@@ -16725,6 +21027,10 @@ def gather_floats(items, pages, decisions):
                 caption=caption,caption_ids=[x['id'] for x in child],has_content=False))
     # Rule 4's unpaired captions/graphics are an independent check. Recovered
     # cells may cover a source graphic; do not emit a second figure over them.
+    # Rule F28: uncaptioned graphics of every page, for the repeated-picture test.
+    orphan_boxes={p['page']:[u['box_px'] for u in p.get('unpaired',[]) if 'graphic' in u['kind'] and not float_label(u.get('caption',''))]
+                  for p in pages}
+    part_record={id(part):record for record,part,it in parts}
     for p in pages:
         if (p.get('scan_evidence') or {}).get('ocr_layer'):continue
         local=[part for record,part,it in parts if part['page']==p['page']]
@@ -16753,11 +21059,46 @@ def gather_floats(items, pages, decisions):
                     ignored.append(dict(page=p['page'],box=b,source_id=u.get('block'),
                                         reason='small uncaptioned graphic wholly in the header or footer band'))
                     continue
-                graphic=float_graphic_box(p,dict(box_px=b,blocks=[u.get('block')]))
+                # Rule F28 (round 5, pool memo 1): an object covering the page under its text is the page's ground.
+                # The ground is left out; what else is drawn in the box is read as the picture, if anything is.
+                ground_cut=False;ground_ids=[]
+                if nocaption_ground(p,b):
+                    art={e.get('id') for e in p.get('art',[])}
+                    drawn=[e for e in p['elements'] if e['kind'] in ('image','path','fill','rule','outline')
+                           and e.get('id') not in art and float_contains(b,e['box_px'])]
+                    rest=[e['box_px'] for e in drawn if not nocaption_ground(p,e['box_px'])]
+                    ground_ids=[e['id'] for e in drawn if nocaption_ground(p,e['box_px'])]
+                    if not rest:
+                        ignored.append(dict(page=p['page'],box=b,source_id=u.get('block'),reason='F28: the page\'s ground under its text'))
+                        burned[0]+=1
+                        continue
+                    b=list(hull(rest));ground_cut=True
+                graphic=float_graphic_box(p,dict(box_px=b,blocks=[] if ground_cut else [u.get('block')]))
                 em=(p.get('main_text') or {}).get('body_size_px') or 16
                 # Isolated publisher icons and tiny decorative rules are not
                 # illustrations. Rule-5 art and furniture were excluded above.
                 if not graphic or min(b[2]-b[0],b[3]-b[1])<3*em:continue
+                # Rules F28-F31 (round 5): furniture first; after the printed-label witness below, the captioned
+                # figure whose space holds the picture, then a lone label of the page; any other picture is kept in
+                # place and listed as doubtful. A frame for text (a shaded box, a highlight) is not a picture and
+                # keeps its earlier handling.
+                frame=nocaption_text_frame(p,b)
+                if not frame:
+                    near=[q['box'] for r,q,_ in parts if q['page']==p['page'] and q.get('has_caption') and q.get('box')]
+                    others=[o for pg,v in orphan_boxes.items() if pg!=p['page'] for o in v]
+                    reason=nocaption_furniture(p,b,others,em,near)
+                    # Rule F28: the same picture (the same image drawn, compared by its bytes) at the same place on
+                    # another page is furniture wherever it stands; figures of one layout size draw different images.
+                    keys=nocaption_image_keys(_NOCAPTION_PDF[0],p.get('params',{}).get('dpi',150))
+                    mine=nocaption_drawn_keys(p['page'],b,keys)
+                    tol=3*(p.get('params',{}).get('dpi',150))/72
+                    if not reason and mine and any(all(abs(box[k]-b[k])<=tol for k in range(4)) and nocaption_drawn_keys(pg,box,keys)==mine
+                                                   for pg,v in keys.items() if pg!=p['page'] for box,_ in v):
+                        reason='F28: the same picture at one place on several pages'
+                    if reason:
+                        ignored.append(dict(page=p['page'],box=b,source_id=u.get('block'),reason=reason))
+                        burned[0]+=1
+                        continue
                 # An isolated printed label next to one orphan graphic is an
                 # independent caption witness (including appendix labels).
                 # Keep the principal region unchanged: the caption is a
@@ -16786,8 +21127,28 @@ def gather_floats(items, pages, decisions):
                         has_content=True,_locate_caption=True))
                     local.append(part)
                     continue
+                if not frame:
+                    for part in local:part_record.setdefault(id(part),next((r for r,q,_ in parts if q is part),None))
+                    owner=nocaption_owner(p,b,local,lambda q:part_record.get(id(q)))
+                    rule='F29'
+                    if owner is None:
+                        lone=[part_record.get(id(q)) for q in local if q.get('has_caption') and not q.get('has_content')]
+                        lone=[r for r in lone if r and r['kind']=='figure']
+                        rest=[v for v in p.get('unpaired',[]) if 'graphic' in v['kind'] and not float_label(v.get('caption',''))
+                              and v is not u and not nocaption_text_frame(p,v['box_px'])
+                              and min(v['box_px'][2]-v['box_px'][0],v['box_px'][3]-v['box_px'][1])>=3*em
+                              and sum(overlap_area(v['box_px'],q['box']) for q in local if q.get('box'))<=.7*max(1,(v['box_px'][2]-v['box_px'][0])*(v['box_px'][3]-v['box_px'][1]))]
+                        if len(lone)==1 and not rest:owner=lone[0];rule='F30'
+                    if owner is not None:
+                        record,part=add(dict(kind='figure',page=p['page'],id=u.get('block'),box=b,caption='',
+                            graphic_box=graphic,has_content=True,_float_join_label=float_label(owner['id']),
+                            _nocaption_join=rule,_ground_ids=ground_ids))
+                        part['nocaption_join']=rule
+                        local.append(part);part_record[id(part)]=record
+                        continue
                 record,part=add(dict(kind='figure',page=p['page'],id=u.get('block'),box=b,
-                    caption='',graphic_box=graphic,has_content=True))
+                    caption='',graphic_box=graphic,has_content=True,_nocaption_inplace=not frame,_ground_ids=ground_ids))
+                if not frame:part['nocaption_inplace']='F31'
             else:continue
             local.append(part)
     # Independent orphan-caption reconciliation can add an earlier page.
@@ -16886,6 +21247,7 @@ def render_float_files(text, items, pages, decisions, paper_dir):
     """
     import math
     import subprocess
+    _NOCAPTION_PDF[0]=table_pdf_path(paper_dir)
     catalog,parts=gather_floats(items,pages,decisions)
     manifest=os.path.join(paper_dir,'copy.floats.json');old_files=set()
     if os.path.isfile(manifest):
@@ -16893,6 +21255,13 @@ def render_float_files(text, items, pages, decisions, paper_dir):
         old_files={p['image']['file'] for r in previous.get('floats',[]) for p in r['parts'] if p.get('image',{}).get('status')=='saved'}
     pdf=table_pdf_path(paper_dir);written=set();counts=collections.Counter();extra=[]
     by_page={p['page']:p for p in pages};page_images={}
+    # Rule F30: a picture joined to a lone label is printed at that label's place. Rule F29: a picture joined to a
+    # figure that has its own picture is part of that figure's one page image, printed at the figure's place.
+    for record,part,it in parts:
+        if not part.get('nocaption_join'):continue
+        sibling=[q for q in record['parts'] if q is not part and q['page']==part['page'] and not q.get('nocaption_join')
+                 and q.get('marker') and q['marker'] in text]
+        if sibling and not any(q.get('graphic_box') for q in sibling):part['marker']=sibling[0].pop('marker')
     for record,part,it in parts:
         lines=[];box=part['graphic_box']
         key=(record['id'],part['page'])
@@ -16960,6 +21329,31 @@ def render_float_files(text, items, pages, decisions, paper_dir):
         crossing=part['accounting']['edge_crossing_objects']
         if crossing:
             lines.append(f'[Float check: {record["id"]}, page {part["page"]}: {crossing} objects cross the region edge; see copy.floats.json.]')
+        if part.get('nocaption_join') and not part.get('marker'):
+            siblings=[q for q in record['parts'] if q is not part and q['page']==part['page'] and not q.get('nocaption_join')]
+            if any(q.get('graphic_box') for q in siblings):continue   # F29: the sibling prints the figure's page image
+            # F30 with a label that has no place mark: the picture goes right after the label's printed caption when
+            # that caption is printed once, otherwise to the unpaired list under the label (below).
+            caption=next((q['caption'] for q in siblings if q.get('caption')),'')
+            if caption:
+                matches=list(re.finditer(r'\s+'.join(re.escape(w) for w in caption.split()),text))
+                if len(matches)==1:
+                    for value in lines:
+                        _TRACE.setdefault('late', []).append(dict(text=value, kind='image_file' if value.startswith('Image file:') else 'notice',
+                            generated='program figure file path' if value.startswith('Image file:') else 'program float check'))
+                    end=matches[0].end();text=text[:end]+'\n\n'+'\n\n'.join(lines)+text[end:]
+                    continue
+        if (record['kind']=='table' and record['check']['status']=='float_without_caption' and not it.get('scan')
+                and part.get('marker') and part['marker'] in text):
+            # Rule F32: a lined-up block with no label is blocked out as an unlabeled table and listed as doubtful.
+            _NOCAPTION_PENDING.append(('F32',part['page'],part.get('box') or part.get('caption_box') or [0,0,0,0],
+                                       'unlabeled_table',f'[Float check: {record["id"]} (page {part["page"]})'))
+        if (record['kind']=='figure' and record['check']['status']=='float_without_caption' and not it.get('scan')
+                and part.get('marker') and part['marker'] in text and part.get('box')
+                and not nocaption_text_frame(by_page[part['page']],part.get('graphic_box') or part['box'])):
+            # Rule F31: an uncaptioned picture the reading order already places is listed as doubtful there.
+            _NOCAPTION_PENDING.append(('F31',part['page'],part['box'],'uncaptioned_picture',
+                                       f'[Float check: {record["id"]} (page {part["page"]})'))
         for value in lines:
             # Native trace: generated float lines become units where written.
             _TRACE.setdefault('late', []).append(dict(text=value, kind='image_file' if value.startswith('Image file:') else 'notice',
@@ -16979,6 +21373,16 @@ def render_float_files(text, items, pages, decisions, paper_dir):
                 if len(matches)==1:
                     end=matches[0].end();text=text[:end]+'\n\n'+'\n\n'.join(lines)+text[end:]
                     continue
+            end=f'<!-- end of page {part["page"]} -->'
+            if it.get('_nocaption_inplace') and not caption and end in text:
+                # Rule F31: an uncaptioned picture in the text column is blocked out by its own box, kept at its
+                # page (before the page's end mark) and listed as doubtful.
+                heading=record['id'];at=text.index(end)
+                text=text[:at]+'\n\n'.join([f'**{heading}** (page {part["page"]})',*lines])+'\n\n'+text[at:]
+                _TRACE.setdefault('late', []).append(dict(text=heading, kind='caption',
+                    generated='program unpaired-float label', runs=[]))
+                _NOCAPTION_PENDING.append(('F31',part['page'],part['box'],'uncaptioned_picture',f'**{heading}** (page {part["page"]})'))
+                continue
             already_printed=bool(caption and compact(caption) in compact(text))
             heading=record['id'] if already_printed else caption or record['id']
             extra.extend(['',f'**{heading}** (page {part["page"]})','',*lines])
@@ -17008,10 +21412,87 @@ def finalize_float_files(paper_dir, path, items, pages, decisions):
     """
     conserve_pdf_copy(paper_dir,path)
     with open(path,encoding='utf-8') as f:text=f.read()
+    del _NOCAPTION_PENDING[:]
     text=render_float_files(text,items,pages,decisions,paper_dir)
     with open(path,'w',encoding='utf-8') as f:f.write(text.rstrip()+'\n')
+    # Rules F31, F32: the doubtful places, with the copy line that prints each.
+    printed=text.rstrip().split('\n')
+    for rule,page,box,reason,needle in _NOCAPTION_PENDING:
+        line=next((n for n,value in enumerate(printed,1) if needle in value),None)
+        doubt_list().add(rule,page,box,reason,line=line)
+    del _NOCAPTION_PENDING[:]
     return path
 
+
+FLOAT_ID_NUMBER = re.compile(r'^(Figure|Fig\.?|Table)\s+(\d{1,3})(?:-?\(?[A-Za-z]\)?)?(?!\w|\.\d)', re.I)
+FLOAT_MENTION = re.compile(r'(?<![\w.])(fig(?:ure)?s?\.?|tables?)\s*(\d{1,2})[a-z]?(?!\d|\.\d|,\d{3})'
+                           r'((?:\s*(?:[-\u2013\u2014]|,|and|&)\s*\d{1,2}[a-z]?(?!\d|\.\d|,\d{3}))*)', re.I)
+FLOAT_SUPP_BEFORE = re.compile(r'(?:supplementa\w*|suppl\.?|supp\.?|supporting|online|additional|appendix|extended\s+data)\s*$', re.I)
+def float_mentions(text):
+    """F34: the figure and table numbers a text mentions, ranges ("Figs. 1-3") and pairs ("Tables 2 and 3")
+    expanded: [(kind, number, start)]. A mention after a supplement word ("supplementary Figure 2") names no
+    float of the PDF and is left out."""
+    out = []
+    for m in FLOAT_MENTION.finditer(text or ''):
+        if FLOAT_SUPP_BEFORE.search(re.sub(r'(\w)-\s+(\w)', r'\1\2', text[max(0, m.start()-40):m.start()])): continue
+        kind = 'figure' if m.group(1).lower().startswith('fig') else 'table'
+        nums = [int(m.group(2))]; prev = nums[0]
+        for sep, n in re.findall(r'\s*([-\u2013\u2014]|,|and|&)\s*(\d{1,2})', m.group(3) or ''):
+            n = int(n)
+            nums.extend(range(prev+1, n+1) if sep in '-\u2013\u2014' and prev < n <= prev+20 else [n]); prev = n
+        out.extend((kind, n, m.start()) for n in nums if n >= 1)
+    return out
+
+def float_number_doubts(paper_dir, pages, path):
+    """F33 and F34, checks across all floats of the copy, listed in the doubt list (the copy is not changed).
+    F33: the plain numbers of the copy's figures and of its tables run 1, 2, 3 ...; each number missing before the
+    highest one means a float was missed and is listed at the next float's caption.
+    F34: every figure or table number that the main text mentions (rule-6 main blocks outside the reference
+    section) needs a float with that label in the copy; a number without one is listed at its first mention."""
+    import bisect
+    D = doubt_list()
+    def caption_number(text):
+        m = FLOAT_ID_NUMBER.match(text or '')
+        return m and ('figure' if m.group(1).lower().startswith('fig') else 'table', int(m.group(2)))
+    try:
+        with open(os.path.join(paper_dir, 'copy.floats.json'), encoding='utf-8') as f: floats = json.load(f).get('floats', [])
+        with open(path, encoding='utf-8') as f: lines = f.read().split('\n')
+    except (OSError, ValueError):
+        return
+    have = {}
+    for fl in floats:
+        key = caption_number(fl.get('id'))
+        if not key or not fl.get('parts'): continue
+        src = next((c for c in fl.get('captions') or [] if c.get('box') and c.get('page')), None) or fl['parts'][0]
+        have.setdefault(key, (src['page'], src['box']))
+    end = next((i for i, ln in enumerate(lines) if ln.startswith('## Places the program is not sure of')), len(lines))
+    def copy_line(test):
+        return next((i+1 for i, ln in enumerate(lines[:end]) if test(ln.strip())), None)
+    for kind in ('figure', 'table'):
+        nums = sorted(n for k, n in have if k == kind)
+        for n in range(1, nums[-1] if nums else 1):
+            if (kind, n) in have: continue
+            nxt = min(m for m in nums if m > n); pg, box = have[(kind, nxt)]
+            line = copy_line(lambda s, kind=kind, nxt=nxt: s.startswith('**') and caption_number(s.strip('*')) == (kind, nxt))
+            D.add('F33', pg, box, 'number_gap:%s:%d' % (kind, n), line=line)
+    seen = set()
+    for p in pages:
+        mt = p.get('main_text') or {}
+        runs = {e['id']: e for e in p.get('elements', []) if e.get('kind') == 'text'}
+        members = {b['id']: b.get('members', []) for b in p.get('blocks', [])}
+        for b in sorted((b for b in mt.get('blocks') or [] if b.get('cls') == 'main' and not b.get('in_refs')),
+                        key=lambda b: (b.get('order') if b.get('order') is not None else 10**6)):
+            rs = sorted((runs[m] for m in members.get(b['id'], []) if m in runs), key=lambda e: (e['box_px'][1], e['box_px'][0]))
+            text, starts = '', []
+            for e in rs:
+                starts.append(len(text)); text += (e.get('text') or '') + ' '
+            for kind, n, at in float_mentions(text):
+                if (kind, n) in have or (kind, n) in seen: continue
+                seen.add((kind, n))
+                e = rs[max(0, bisect.bisect_right(starts, at)-1)]
+                line = copy_line(lambda s, kind=kind, n=n: not s.startswith(('**', '#', '- ', '|', '[', '<!--'))
+                                 and any(k == kind and m == n for k, m, _ in float_mentions(s)))
+                D.add('F34', p['page'], e['box_px'], 'mention_without_float:%s:%d' % (kind, n), line=line)
 
 def finish_float_copy(paper_dir, path):
     """Apply requested reader agreement and record only current accepted repairs."""
@@ -17194,7 +21675,9 @@ def arrange_floats(items, pages, uncertain):
         # A labelled continuation or proven additional-column part at the top
         # precedes the page's prose. Other inferred rows keep their old anchor.
         page=by_page[it['page']]
-        continued=it.get('printed_continued') or '(additional columns' in it['caption'].lower()
+        continued=(it.get('printed_continued') or '(additional columns' in it['caption'].lower()) and not it.get('r8_keep_place')
+        # round 8 memo 1 (lane r8-box): a part that only gained its printed label (r8_wide_label_caption) keeps the place
+        # BASE gave it as a part with no caption, so the blocks round it keep their order
         page_boxes=[b.get('box') for i,b in ps if b['page']==it['page'] and b.get('box')]
         top=bool(page_boxes) and it['top'] < min(b[1] for b in page_boxes)
         fb=it.get('box')
@@ -17277,7 +21760,12 @@ def arrange_floats(items, pages, uncertain):
         out.extend(float_order(earlier+fs))
     for i,it in enumerate(body):
         emit(before[i],i)
-        pending=[f for f in unanchored if f['page']<it['page']]
+        # round 8 memo 1 (lane r8-box): a part that only gained its printed label and is anchored to no paragraph (its
+        # label line, outside the part, was the page's prose) is printed before the side text of its page and before
+        # a reference-list heading standing below its top, where BASE printed it after that label line; a part whose
+        # label was its own first line keeps BASE's place as it is
+        pending=[f for f in unanchored if f['page']<it['page'] or
+                 f.get('r8_keep_place')=='after_label' and f['page']==it['page'] and (it['kind']=='side' or it.get('_r8_top',-1)>=f.get('top',0))]
         out.extend(float_order(pending));unanchored=[f for f in unanchored if f not in pending]
         out.append(it)
         # A paragraph may cross a page occupied only by a table; finish the sentence, then keep those
@@ -20519,6 +25007,163 @@ def side_abstract_heading(items, front_page):
                  and it.get("page", front_page) == front_page), None)
 
 
+CAPTION_CLOSED = re.compile(r'[.!?:][\])”’\'"*†‡]*$')
+
+
+def caption_foot_continuations(pages, body):
+    """Rules F14 and F15 (round 5, lane captionside): a figure caption that reaches the foot of its column with no
+    gap after it, its last line leaving a sentence open (no closing stop, or a word broken by a hyphen), continues at
+    the top of the next column: the next column to its right on its page, else the first column of the next page.
+      - The continued part is in the caption's own type (its text's size and face family, the label left out), starts
+        before any gap and is not a label: its lines, down to the first gap clearly larger than the caption's own line
+        spacing (F6) or a change of type, are the caption's (returned, joined by apply_caption_continuations).
+      - Where the caption is in the body type (the paper's body size and the body text's face family), its
+        continuation cannot be told from body text by its marks: the place is listed as doubtful (F15, the "does this
+        continue that sentence" question, with its two fixed answers) and the printed order is kept.
+    "The foot of the column": nothing printed under the caption in its own width on the page (furniture aside), and
+    its bottom within one and a half body sizes of the paper's body foot (the lowest body line, as most pages have
+    it). Scan pages are not read here. Returns [(page index, label run id, page index of the part, run ids)]."""
+    doubts = _doubt_list()
+    def face_of(e):
+        spans = e.get('font_spans') or []
+        if spans: return collections.Counter({s.get('font'): s.get('end', 0) - s.get('start', 0) for s in spans}).most_common(1)[0][0]
+        return e.get('font') if isinstance(e.get('font'), str) else None
+    def type_of(es):
+        sizes, faces = collections.Counter(), collections.Counter()
+        for e in es:
+            n = max(1, len(e['text'].strip()))
+            sizes[round(e.get('run_size_px', e['size_px']), 1)] += n
+            if face_of(e): faces[face_family(face_of(e))] += n
+        return (sizes.most_common(1)[0][0] if sizes else None, faces.most_common(1)[0][0] if faces else None)
+    def same(a, b): return bool(a[0] and b[0]) and abs(a[0] - b[0]) <= .04 * max(a[0], b[0]) and a[1] == b[1]
+    def page_runs(p):
+        furn = {m for f in (p.get('main_text') or {}).get('furniture', []) for m in f.get('members', [])}
+        return {e['id']: e for e in p['elements'] if e['kind'] == 'text' and e['text'].strip() and not e.get('angle')
+                and e['id'] not in furn and not e.get('furniture_reason')}
+    feet, body_faces = [], collections.Counter()
+    for p in pages:
+        if (p.get('scan_evidence') or {}).get('ocr_layer'): continue
+        rs = {e['id']: e for e in p['elements'] if e['kind'] == 'text'}
+        own = {b['id']: b.get('members', []) for b in p.get('blocks', [])}
+        ordered = [m for b in (p.get('main_text') or {}).get('blocks', []) if b.get('order') is not None and b.get('cls') == 'main'
+                   for m in own.get(b['id'], []) if m in rs]
+        if ordered: feet.append(max(rs[m]['box_px'][3] for m in ordered))
+        for m in ordered:
+            if face_of(rs[m]): body_faces[face_family(face_of(rs[m]))] += len(rs[m]['text'])
+    if not feet or not body_faces: return []
+    feet.sort(); foot = feet[int(.9 * (len(feet) - 1))]
+    body_type = (body, body_faces.most_common(1)[0][0])
+    out = []
+    for i, p in enumerate(pages):
+        if (p.get('scan_evidence') or {}).get('ocr_layer'): continue
+        runs = page_runs(p)
+        blocks = {b['id']: b for b in p.get('blocks', [])}
+        cap_blocks = [bid for f in p.get('floats', []) for bid in f.get('blocks', [])]
+        cap_blocks += [u['block'] for u in p.get('unpaired', []) if u.get('block') and 'caption' in u.get('kind', '')]
+        graphic = {m for f in p.get('floats', []) for bid in f.get('blocks', []) for m in (blocks.get(bid) or {}).get('members', [])}
+        for bid in dict.fromkeys(cap_blocks):
+            es = [runs[m] for m in (blocks.get(bid) or {}).get('members', []) if m in runs]
+            rows = text_rows(es)
+            if not rows: continue
+            label = float_label(label_fix(' '.join(e['text'].strip() for e in rows[0])))
+            if not label or label['kind'] != 'figure': continue
+            last = ' '.join(e['text'].strip() for e in rows[-1])
+            if CAPTION_CLOSED.search(last) and not re.search(r'[^\W\d_]-$', last): continue
+            box = hull(e['box_px'] for e in es); h = statistics.median(e.get('run_size_px', e['size_px']) for e in es)
+            if any(m not in (blocks.get(bid) or {}).get('members', []) and e['box_px'][1] > box[3] - .3 * h
+                   and min(e['box_px'][2], box[2]) > max(e['box_px'][0], box[0]) for m, e in runs.items()): continue
+            if box[3] < foot - 1.5 * body: continue
+            ctype = type_of([e for row in rows[1:] for e in row] or es)
+            if same(ctype, body_type):
+                doubts.add('F15', p['page'], box, 'caption_open_at_column_foot_in_body_type',
+                           options=['the next column continues the caption', 'the next column does not continue the caption'])
+                continue
+            # the next column: right of the caption on this page, under any item that spans both (a band), else the
+            # first column of the next page
+            columns = sorted((p.get('main_text') or {}).get('columns', []))
+            cx = (box[0] + box[2]) / 2
+            col = next((k for k, (l, r) in enumerate(columns) if l - body <= cx <= r + body), None)
+            target = None
+            if col is not None and col + 1 < len(columns):
+                l, r = columns[col + 1]
+                band = [e['box_px'][3] for e in runs.values() if e['box_px'][0] < columns[col][1] and e['box_px'][2] > l
+                        and e['box_px'][3] <= box[1]]
+                top = max(band, default=-1)
+                cand = [e for m, e in runs.items() if l - body <= (e['box_px'][0] + e['box_px'][2]) / 2 <= r + body
+                        and e['box_px'][1] >= top and m not in graphic]
+                if cand: target = (i, cand)
+            if target is None and i + 1 < len(pages) and not (pages[i + 1].get('scan_evidence') or {}).get('ocr_layer'):
+                q = pages[i + 1]; qruns = page_runs(q)
+                qcols = sorted((q.get('main_text') or {}).get('columns', []))
+                qblocks = {b['id']: b for b in q.get('blocks', [])}
+                qgraphic = {m for f in q.get('floats', []) for bid2 in f.get('blocks', []) for m in (qblocks.get(bid2) or {}).get('members', [])}
+                if qcols:
+                    l, r = qcols[0]
+                    cand = [e for m, e in qruns.items() if (e['box_px'][0] + e['box_px'][2]) / 2 <= r + body and m not in qgraphic]
+                    if cand: target = (i + 1, cand)
+            if target is None: continue
+            j, cand = target
+            trows = text_rows(cand)
+            first = trows[0] if trows else []
+            if not first or float_label(label_fix(' '.join(e['text'].strip() for e in first))) or not same(ctype, type_of(first)): continue
+            spacing = (statistics.median((rows[k + 1][0]['box_px'][1] - rows[k][0]['box_px'][1]) for k in range(len(rows) - 1))
+                       if len(rows) > 1 else 1.3 * h)
+            part = [first]
+            for row in trows[1:]:
+                if (row[0]['box_px'][1] - part[-1][0]['box_px'][1] > 1.4 * max(spacing, 1.05 * h) or not same(ctype, type_of(row))
+                        or float_label(label_fix(' '.join(e['text'].strip() for e in row)))): break
+                part.append(row)
+            out.append((i, rows[0][0]['id'], j, [e['id'] for row in part for e in row]))
+    return out
+
+
+def apply_caption_continuations(pages, per_page, conts):
+    """Rule F14 (lane captionside): the continued part of a caption leaves the body (or side) text of its page and is
+    printed as the caption's last lines; its runs are claimed by the caption (caption_cont_runs, trace_float). A part
+    that the page reading did not print as leading lines of one text block, or a caption that is not among the page's
+    floats, is left as it is."""
+    def runs_of(value): return {m for row, a, b in trace_segs(value) for m in _TRACE['rows'][row]['runs']}
+    for i, lab, j, ids in conts:
+        ids = set(ids)
+        floats = list(per_page[i][1])
+        k = next((n for n, f in enumerate(floats) if lab in (f[5].get('caption_ids') or [])), None)
+        if k is None: continue
+        blocks, side = list(per_page[j][0]), list(per_page[j][2])
+        taken = None
+        for n, b in enumerate(blocks):
+            lines = b.get('lines') or []
+            lead = 0
+            while lead < len(lines) and runs_of(lines[lead]) and runs_of(lines[lead]) <= ids: lead += 1
+            if not lead: continue
+            got = set().union(*(runs_of(x) for x in lines[:lead]))
+            if not got >= ids: break
+            taken = lines[:lead]
+            if lead == len(lines): del blocks[n]
+            else:
+                b = dict(b)
+                for key in ('lines', 'lefts', 'sizes', 'row_boxes', 'emphasis', 'faces', 'prefixes'):
+                    if key in b and isinstance(b[key], list) and len(b[key]) == len(lines): b[key] = b[key][lead:]
+                b['first'] = b['lines'][0]
+                b['meta'] = dict(b['meta'], lines=len(b['lines']), box_px=hull(b['row_boxes']) if b.get('row_boxes') else b['meta'].get('box_px'))
+                blocks[n] = b
+            break
+        if taken is None:
+            for n, txt in enumerate(side):
+                lines = txt if isinstance(txt, list) else [txt]
+                if lines and all(runs_of(x) and runs_of(x) <= ids for x in lines) and set().union(*(runs_of(x) for x in lines)) >= ids:
+                    taken = list(lines); del side[n]; break
+        if taken is None: continue
+        top, kind, caption, rows, notes, placement = floats[k]
+        for x in taken: caption = caption + '\n' + x
+        placement = dict(placement, caption_cont_runs=[(pages[j]['page'], m) for m in sorted(ids, key=str)])
+        floats[k] = (top, kind, caption, rows, notes, placement)
+        per_page[i] = (per_page[i][0], floats, per_page[i][2])
+        per_page[j] = (blocks, per_page[j][1], side)
+
+
+WRAP_DOUBT_OPTIONS = ("across: read each row's left piece, then its right piece", "down: read the left side down, then the right side")
+
+
 def main(paper_dir):
     # Optional PCL writer: capture native typography before later ownership
     # passes create fragments, and keep all additional output in sidecars.
@@ -20530,7 +25175,14 @@ def main(paper_dir):
         pcl_writer = importlib.util.module_from_spec(spec); spec.loader.exec_module(pcl_writer)
     _RAISED_SENTENCE_ENDINGS.clear()
     trace_reset()
+    doubt_list().reset()   # round 5: the one doubt list of this paper, reset once here
     pages, mt, au = load(paper_dir)
+    # lane r5-wrap: a picture with text on both sides whose order rule 6 could not settle (O33, O34) is doubtful;
+    # its text stays in the copy in the order printed
+    for p in pages:
+        for w in (p.get('main_text') or {}).get('wraps', []):
+            if w.get('doubt'):
+                doubt_list().add(w['doubt'][0], p['page'], w['box_px'], w['doubt'][1], options=WRAP_DOUBT_OPTIONS)
     for p in pages: p.pop('copy_stream_moves', None)   # this run's stream moves only
     scan_detect(pages, table_pdf_path(paper_dir))
     prepare_proof(pages, au)
@@ -20538,6 +25190,7 @@ def main(paper_dir):
         path = finish_float_copy(paper_dir,copy_ocr_scan(paper_dir,pages,au))
         trace_finish(paper_dir, path, pages, scan_document=True)
         if pcl_writer: pcl_writer.write(paper_dir, table_pdf_path(paper_dir), None, pages)
+        doubt_list().write(paper_dir)   # round 5: written once, at the end of the paper (scan document)
         return path
     scan_sections = {}
     scan_pages = [p for p in pages if (p.get('scan_evidence') or {}).get('ocr_layer')]
@@ -20581,20 +25234,36 @@ def main(paper_dir):
     recover_table_column_parts(pages, body)
     recover_table_frame_furniture(pages)
     sign_text_runs(pages, uncertain)
+    unknown_markers = unknown_form_markers(pages, au)   # round 6 rule A20, read before the font check
     if any(e.get('font_subs') or e.get('outline_warnings') for p in pages for e in p['elements']):
         import importlib.util
         spec = importlib.util.spec_from_file_location('_copy_font_checks', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools', 'check_fonts.py'))
         font_checks = importlib.util.module_from_spec(spec); spec.loader.exec_module(font_checks)
         font_checks.apply_copy(pages, uncertain)
+    resolve_unknown_markers(pages, au, unknown_markers, uncertain)
     replace_private_codes(pages, au, uncertain)
     restore_ligature_text(pages, uncertain)
     omit_unpainted_text(pages, au.get('page', 1))
     list_overprinted_layers(pages, uncertain)
     restore_prose_glyphs(pages)
+    same_glyph_same_sign(pages, uncertain)
+    r8_paper_normal(pages)   # round 8 TF1 (lane r8-box): the normal column from the whole paper
+    for i, p in enumerate(pages):   # a part may run on from a table on the page before (TF8): lane r8-box reads that
+        prev = pages[i-1] if i else {}
+        p['_r8_prev_table'] = bool(prev and (prev.get('tables') or any(
+            e['kind'] == 'text' and r8_label_line(e['text']) for e in prev.get('elements', []))))
     _TRACE['source_pages'] = trace_snapshot(pages)
     pcl_sources = pcl_writer.snapshot(pages) if pcl_writer else None
     prepare_front_matter(pages, au)
-    front_records, byline_count = printed_front_matter(pages, au)
+    try:
+        front_records, byline_count = printed_front_matter(pages, au)
+    except (ValueError, KeyError, IndexError, TypeError, ZeroDivisionError) as err:
+        # Rule C5 (round 6): a front page the byline reader cannot follow still gets a copy. Its rows stay
+        # where the page reading places them, and the place is listed as doubtful.
+        front_records, byline_count = [], 0
+        uncertain.append(f'front matter: the printed byline rows could not be read ({type(err).__name__}); check the PDF')
+        _fp = pages[front_page_index(pages, au)] if pages else None
+        if _fp: doubt_list().add('C5', _fp['page'], (au.get('title') or {}).get('box_px') or _fp.get('region_box_px') or [0, 0, 0, 0], 'front_rows_not_read')
     prepare_reference_columns(pages, body)
     prepare_reference_islands(pages, body)
     paper_gutters(pages, body)
@@ -20615,6 +25284,31 @@ def main(paper_dir):
     per_page=[read(i) for i in range(len(pages))]
     for i in sorted(recover_unowned_table_parts(pages,per_page,body)):
         page_uncertain[i]=[];per_page[i]=read(i)
+    # lane r5-turned (F18): a turned float page whose turned lines stayed outside its one turned table is read again
+    # with those lines in the table's part; if turned text still stays outside, the page returns to its earlier
+    # reading
+    for i,p in enumerate(pages):
+        if p.get('_turned_float_offer'):
+            import copy as _copy
+            before=_copy.deepcopy(p)
+            p['_turned_float_runs']=p['_turned_float_offer']
+            page_uncertain[i]=[]; per_page[i]=read(i)
+            if p.get('_turned_float_left'):
+                p.clear(); p.update(before); page_uncertain[i]=[]; per_page[i]=read(i)
+            p.pop('_turned_float_runs',None)
+    # its output check: on a page where most text is turned, no turned line is left as side text; a page where one
+    # is left is listed as doubtful (rule F18), its text kept at its page position
+    del F18_DOUBTS[:]
+    for p in pages:
+        boxes=p.get('_turned_float_left') or []
+        if boxes:   # one entry for the page: the hull of what is outside, the count in the reason
+            F18_DOUBTS.append((p['page'], hull(boxes), len(boxes)))
+            uncertain.append(f"page {p['page']}: {len(boxes)} turned line group(s) left outside the turned float of a turned page (rule F18); check against the PDF")
+    # (candidate-r5: the F14 continuations are applied after the F18 re-reading, which rebuilds per_page of a page)
+    # Rules F14 and F15 (lane captionside): a caption that runs off its column foot continues in the next column.
+    apply_caption_continuations(pages, per_page, caption_foot_continuations(pages, mt.get('body_size_px') or 16.0))
+    # Rules TP1 to TP3 (round 7, lane r7-pairing): one caption, one table
+    pair_orphan_tables(pages, per_page, body, page_uncertain)
     for i,(_,floats,_) in enumerate(per_page):
         if not any(f[1]=='table' and 'no caption' in f[2] for f in floats):
             page_uncertain[i]=[u for u in page_uncertain[i] if not u.startswith(
@@ -20671,6 +25365,21 @@ def main(paper_dir):
         byline_runs = trace_box_runs(pages[front_index], au.get('author_box_px'), au.get('author_run_ids', [])) if pages else []
         out += ["", "**Authors:** " + "; ".join(trace_mark(nm, 'author', group=byline, runs=[] if k else byline_runs)
             for k, nm in enumerate(names))]
+    # Round 6 rules C1, C3 and C4: the anchors confirm each other. A title with no author line next to it,
+    # and an author line that does not read as a series of names, go to the doubt list (copy.md unchanged:
+    # the best block stays printed, the author line under the existing "not verified" flag). C4: a later
+    # stage may ask the local AI "is this a list of people's names?" (yes or no); no model runs here.
+    if pages and (au.get('title') or {}).get('text'):
+        _fpage = pages[front_index]['page']; _authors = au.get('authors', [])
+        if not _authors and not au.get('group_authors'):
+            doubt_list().add('C1', _fpage, au['title'].get('box_px') or [0, 0, 0, 0], 'title_without_author_line')
+        elif _authors and (author_parse_stopped or not all(a.get('name_ok') for a in _authors) or len(names) < byline_count):
+            _box = au.get('author_box_px') or au['title'].get('box_px') or [0, 0, 0, 0]
+            _line = next((i + 1 for i, l in enumerate(out) if l.startswith('**Authors:**')), None)
+            doubt_list().add('C4', _fpage, _box, 'author_line_not_verified', options=('yes', 'no'), line=_line)
+    elif pages and not scan:
+        _fp = pages[front_index]
+        doubt_list().add('C1', _fp['page'], _fp.get('region_box_px') or [0, 0, 0, 0], 'no_title_found')
     affiliations = front_matter(pages, au, J)
     printed = []
     affiliation_prefixes = []
@@ -20700,6 +25409,9 @@ def main(paper_dir):
     for marker, txt, page_no in affiliations:
         if marker: shared.setdefault(txt, []).append(marker)
     printed += [",".join(ms) + txt for txt, ms in shared.items() if len(ms) > 1]
+    # Round 6 rule N1: the list "Author notes" stands right after the affiliations (filled below, once the
+    # front-page records are cut).
+    notes_at = len(out)
     if front_unverified or any(r['late'] for r in front_records):
         out += ['', '**Front matter as printed**', '',
                 '[Author list or affiliation links not verified; source lines follow in printed order.]' if front_unverified else
@@ -20740,6 +25452,8 @@ def main(paper_dir):
     # Recover only explicitly labelled publication information and author notes.
     extra_info = list(pages[front_index].get('_front_info', [])) if pages else []
     if pages: extra_info += article_doi_lines(pages[front_index])
+    # Lane r6-artinfo (I6/I9): the page-one DOI in its other printed forms, added last, kept once
+    later_doi = article_doi_lines(pages[front_index], other_forms=True) if pages else []
     if pages:
         first = pages[front_index]
         for block in first.get("blocks", []):
@@ -20813,9 +25527,34 @@ def main(paper_dir):
                 rest = [m for m in ms if m not in used and not fruns[m].get('furniture_reason')]
                 rows = text_rows([fruns[m] for m in rest])
                 lines = [trace_row(first['page'], row, ' '.join(e['text'].strip() for e in row)) for row in rows]
-                if len(lines) <= 2 and all(len(line.split()) <= 6 for line in lines):
+                if set(au.get('t6_label_run_ids', [])).intersection(rest) and lines:
+                    # (round 6, memo 1: a one-word label set aside by rule T6 is no article information)
+                    unplaced_front.append(lines)
+                    doubt_list().add('C3', first['page'], hull([fruns[m]['box_px'] for m in rest]), 'front_rows_not_placed')
+                elif len(lines) <= 2 and all(len(line.split()) <= 6 for line in lines):
                     extra_info.extend([line] for line in lines)
                 elif lines: unplaced_front.append(lines)
+                continue
+            # Round 6 rule C3 (never drop front-page text): a label rule 8 rejected as the title (it is printed
+            # under Article information) does not make its block used; the block's other rows are quoted.
+            rejected = {m for source in au.get('article_info', []) if source.get('role') in ('rejected title row', 'series label')
+                        for m in source.get('run_ids', []) if source.get('page', first['page']) == first['page']}
+            if rejected.intersection(ms) and len(ms) > len(rejected.intersection(ms)):
+                # rows the page reading already prints (front information entries) are not quoted again
+                info_runs = {m for r, a, b in trace_segs(per_page[front_index][2] if per_page else [])
+                             for m in _TRACE['rows'][r]['runs'] if _TRACE['rows'][r]['page'] == first['page']}
+                rest = [m for m in ms if m not in rejected and m not in info_runs]
+                if rest and not any(m in info_runs for m in ms): ms = rest
+            t6_rest = [m for m in ms if m not in used and not fruns[m].get('furniture_reason')]
+            # (round 6, memo 1) the same for rows rule 8 released from the author line (a label row, a date row or a
+            # reference entry it no longer takes as names): a partly used block keeps them printed
+            if ((set(au.get('t6_label_run_ids', [])) | set(au.get('released_run_ids', []))).intersection(t6_rest)
+                    and len(t6_rest) < len(ms)):
+                # (round 6, memo 1) a one-word label set aside by rule T6 in a block whose other rows rule 8 used (an
+                # author row in the same rule-6 block): its unused rows are quoted, never dropped, and listed (C3)
+                rows = text_rows([fruns[m] for m in t6_rest])
+                unplaced_front.append([trace_row(first['page'], row, ' '.join(e['text'].strip() for e in row)) for row in rows])
+                doubt_list().add('C3', first['page'], hull([fruns[m]['box_px'] for m in t6_rest]), 'front_rows_not_placed')
                 continue
             if not ms or any(m in used or fruns[m].get('furniture_reason') for m in ms): continue
             rows = text_rows([fruns[m] for m in ms])
@@ -20823,9 +25562,16 @@ def main(paper_dir):
             flat = ' '.join(lines)
             citation = (re.search(r'\b(?:19|20)\d{2}\b', flat) and
                         re.search(r'\b\d+\s*[;:(]\s*\d+|\bdoi\b|\b10\.\d{4,9}/', flat, re.I) and len(rows) <= 6)
+            t6 = set(au.get('t6_label_run_ids', [])).intersection(ms)
+            if t6:
+                # Round 6 (memo 1): the block of a one-word label that rule 8 set aside (rule T6) is no article
+                # information. Its rows are quoted under the flagged "not placed" block and listed as doubtful (C3).
+                unplaced_front.append(lines)
+                doubt_list().add('C3', first['page'], hull([fruns[m]['box_px'] for m in ms]), 'front_rows_not_placed')
+                continue
             (extra_info if citation else unplaced_front).append(lines)
     info_rows = []
-    for lines in (per_page[front_index][2] if per_page else []) + extra_info:
+    for lines in (per_page[front_index][2] if per_page else []) + extra_info + later_doi:
         if only_quoted(lines): continue
         # A complete affiliation can contain printed bullet markers. Remove
         # its already-owned span before splitting, retaining all other rows.
@@ -20847,7 +25593,7 @@ def main(paper_dir):
             part.append(line)
         if part: info_rows.append(part)
     # Deduplicate actual printed spans, including affiliations embedded in a main-text block.
-    info, side_abstract = [], None
+    info, side_abstract, side_abstract_runin = [], None, False
     # R2e (lane f5stream): the body's first sentence may open inside an article-information
     # block (front_return_rows); those rows go back to the stream head.
     # The front page's first body block, when it is a paragraph (three lines or more; a masthead
@@ -20856,12 +25602,21 @@ def main(paper_dir):
     first_body = (str(first_block['lines'][0]) if first_block and len(first_block['lines']) >= 3 and not first_block.get('_abstract')
                   and len(str(first_block['lines'][0]).split()) >= 3 else '')   # a lone "abstract" label line is no body start
     returned_front, held_front = [], []
+    # Lane r6-artinfo, rules I3/I4/I10: a record the licence cleanup would cut short is first cut
+    # at its printed label rows; the licence record alone is then removed (cut_records).
+    info_rows, licence_pieces = cut_records(info_rows, lambda t: without_front_text(t, printed, J, prefixes=affiliation_prefixes),
+                                            pages[front_index].get('_owned_header_info', []) if pages else [])
+    if pages: licence_pieces += licence_continuations(info_rows, pages[front_index])
     for txt in info_rows:
         raw = without_front_text(txt, printed, J, prefixes=affiliation_prefixes)
         # Newly classified header text is explicitly owned and must survive
         # boilerplate cleanup, including licence and copyright statements.
         explicit = pages and txt in pages[front_index].get('_owned_header_info', [])
-        flat = (raw if explicit else clean_article_info(raw)).lstrip("| ").strip()
+        # I10: a licence record is left out even when it was owned as header text (only that record: the
+        # header's rows were cut at their labels when they were owned)
+        licence = ((any(txt is x for x in licence_pieces) or bool(explicit and LICENCE_RECORD.match(str(txt[0]) if txt else '')))
+                   and not sign_citation(raw))   # memo artinfo-2: a citation after the sign is kept by the cleanup
+        flat = ('' if licence else raw if explicit and not sign_citation(raw) else clean_article_info(raw)).lstrip("| ").strip()
         # What remains of an address row after its printed affiliations are
         # removed can be the conjunction between them (AL05 "..., USA, and").
         if re.fullmatch(r'(?:and|&|[,;.])(?:\s+(?:and|&|[,;.]))*', flat, re.I): flat = ''
@@ -20869,14 +25624,24 @@ def main(paper_dir):
             # Licence, copyright and publication-footer rows dropped by the cleanup
             # are furniture (D-637): record the reason, so the trace does not count
             # them lost or leave them only in the uncertainty list (N21, L03).
-            if raw.strip() and not explicit and pages:
+            if raw.strip() and (not explicit or licence) and pages:
                 for r, a, b in trace_segs(txt):
                     row = _TRACE['rows'][r]; target = next((q for q in pages if q['page'] == row['page']), None)
                     if target is None or any((row['page'], m) in quoted_runs for m in row['runs']): continue
                     exclude_conserved_runs(target, row['runs'], 'licence, copyright or publication footer removed by article-information cleanup (D-637)')
             continue
+        doi_rows = {r for r, a, b in trace_segs(later_doi)}
+        if doi_rows and {r for r, a, b in trace_segs(txt)} <= doi_rows:
+            # I9: the page-one DOI in another printed form is kept once: not where the front already holds it
+            doi = re.search(r'10\.\d{4,9}/\S+', str(flat))
+            if doi and any(compact(doi.group(0).rstrip('.')) in compact(x) for x in list(info) + list(printed)): continue
+        flat = join_broken_identifiers(flat, txt)   # lane r6-artinfo, rule I7
         flat = (trace_src(flat, txt) if compact(flat) == compact(' '.join(txt)) else trace_partial(flat, txt))
-        if side_abstract is None and len(flat.split()) >= 60 and re.match(r"^(Abstract|ABSTRACT|Summary|Objectives?|Aims?|Background|Purpose|Introduction|Context)\b", flat):
+        # lane r6-abstract (B2): with no such opening word, two or more run-in labels in a row (the entry opens with
+        # one; one of them a methods, results or conclusion part) make the entry the abstract too
+        opening_word = re.match(r"^(Abstract|ABSTRACT|Summary|Objectives?|Aims?|Background|Purpose|Introduction|Context)\b", flat)
+        if side_abstract is None and len(flat.split()) >= 60 and (opening_word or runin_labelled_abstract(flat)):
+            side_abstract_runin = not opening_word
             side_abstract = trace_src(re.sub(r"^(Abstract|ABSTRACT|Summary)\s*:?\s*", "", flat), flat); continue
         # A shorter record inside a longer kept one repeats it only when its own
         # rows are already claimed there (W07: the masthead's "Bone" row is not
@@ -20901,6 +25666,17 @@ def main(paper_dir):
                              f"first sentence and were returned to the body ({back['why']}); check that block against the PDF")
             if back['rest']: info.append(back['rest'])
             continue
+        # memo artinfo-1 (M1): the term list directly after its keyword label (a row of its own) is that label's list
+        label_list = bool(info) and bool(re.fullmatch(r'Key\s*(?:words|points)\s*:?\s*', str(info[-1]), re.I)) and keyword_term_list(flat)
+        if pages and not label_list and unlabelled_lowercase_entry(flat):
+            # Lane r6-artinfo, rule I5 (output check): an entry with no label that opens with an ordinary
+            # lowercase word is not article information; it is quoted as printed in the flagged block and
+            # listed as doubtful, never printed as an article-information record.
+            unplaced_front.append([flat])
+            doubt_list().add('I5', pages[front_index]['page'], rows_box(txt, pages[front_index]), 'unlabelled_lowercase_entry_quoted')
+            uncertain.append(f"page {pages[front_index]['page']}: an article-information entry opens with a lowercase word and no "
+                             "label; quoted under Front-page text as printed (not placed)")
+            continue
         info.append(flat)
     # A keyword strip spanning the page below a wide abstract is separate from
     # the footnote addresses beneath it. Keep later footnotes under Article information.
@@ -20912,6 +25688,139 @@ def main(paper_dir):
                                 e['box_px'][2] - e['box_px'][0] > .6 * width for e in pages[front_index]['elements'])
     keywords = [re.match(r'^(Key\s*words)\s*:\s*(.*)', t, re.I) for t in info]
     article_info = [t for t, kw in zip(info, keywords) if not (spanning_keywords and kw)]
+    # Round 6 rules N1, N2, N4, N5, N7 and N8: author notes. A front-page record that opens with a mark the author
+    # line sets after a name, and that is no affiliation of that mark, is an author note: it is printed, mark first
+    # and once, in the list "Author notes" right after the affiliations, and nowhere else (a contact line with an
+    # author's mark has this one home; a contact line with no mark stays article information). A note that names
+    # an institution (it may be an affiliation) is printed there marked not verified (N8). A mark on a name with
+    # no affiliation and no note stays on the name and is listed as doubtful (N7).
+    author_notes = []
+    if names and not source_panel and pages:
+        aff_marks = {m for m, _, _ in affiliations if m}
+        name_marks = {m for a in au.get('authors', []) for m in a.get('markers', []) + a.get('notes', []) if m and m != 'envelope'}
+        note_marks = sorted((m for m in name_marks - aff_marks if not any(ch.isalnum() for ch in m)), key=len, reverse=True)
+        kept_info = []
+        fpage = pages[front_index]
+        fruns_all = {e['id']: e for e in fpage['elements'] if e.get('kind') == 'text'}
+        def mark_beside(t):
+            # N5: a name's mark printed as a run of its own directly left of the record's first row, level with it
+            # (the mark of a "Correspondence:" line set in the margin)
+            rows = [[fruns_all[m] for m in _TRACE['rows'][r]['runs'] if m in fruns_all]
+                    for r, a, b in trace_segs(t) if _TRACE['rows'][r]['page'] == fpage['page']]
+            rows = [row for row in rows if row]
+            if not rows: return None
+            runs_of = [e for row in rows for e in row]
+            top = min(e['box_px'][1] for e in runs_of)
+            # the record's first printed line: its runs level with the topmost one, the leftmost of them
+            lead = min((e for e in runs_of if e['box_px'][1] - top < .5 * (e.get('run_size_px') or 10)), key=lambda e: e['box_px'][0])
+            lb = lead['box_px']; size = lead.get('run_size_px') or 10
+            near = [e for e in fruns_all.values() if e['text'].strip() in note_marks and 0 <= lb[0] - e['box_px'][2] <= 2 * size
+                    and min(e['box_px'][3], lb[3]) - max(e['box_px'][1], lb[1]) > 0 and e['box_px'][1] >= lb[1] - .5 * size]
+            # the mark level with the row's top (a mark beside the next row may touch this one)
+            return min(near, key=lambda e: abs(e['box_px'][1] - lb[1])) if near else None
+        def margin_mark(row):
+            # the name's mark set as a run of its own in the margin, level with this printed row
+            lead = min(row, key=lambda e: e['box_px'][0]); lb = lead['box_px']; size = lead.get('run_size_px') or 10
+            near = [e for e in fruns_all.values() if e['text'].strip() in note_marks and 0 <= lb[0] - e['box_px'][2] <= 2 * size
+                    and min(e['box_px'][3], lb[3]) - max(e['box_px'][1], lb[1]) > 0 and e['box_px'][1] >= lb[1] - .5 * size]
+            return min(near, key=lambda e: abs(e['box_px'][1] - lb[1])) if near else None
+        def split_at_margin_marks(t):
+            # (memo 1 M5) each printed row that opens with a name's mark of its own (a margin run, its first run, or
+            # the first sign of its text) starts its own note: a record joining a marked contact row and a marked
+            # contribution row is cut into one part per mark
+            ids = [m for r, a, b in trace_segs(t) if _TRACE['rows'][r]['page'] == fpage['page'] for m in _TRACE['rows'][r]['runs']]
+            prows = [sorted(row, key=lambda e: e['box_px'][0]) for row in text_rows([fruns_all[m] for m in dict.fromkeys(ids) if m in fruns_all])]
+            # only the rows the record still prints (text already printed as an affiliation was taken out of it); the
+            # rows taken out stay claimed by the first part, as the whole record claimed them
+            whole = compact(str(t))
+            printed_rows = [row for row in prows if compact(' '.join(e['text'] for e in row if e['text'].strip() not in note_marks)) in whole]
+            taken_out = [trace_row(fpage['page'], row, ' '.join(x['text'].strip() for x in row)) for row in prows if row not in printed_rows]
+            prows = printed_rows
+            marks = []
+            for k, row in enumerate(prows):
+                head = row[0]['text'].strip()
+                lead = next((m for m in note_marks if head.startswith(m) and head[len(m):len(m) + 1] != m[0]), None)
+                if len(row) > 1 and head in note_marks:   # the mark read into the record as its row's first run
+                    marks.append((head, row[0])); prows[k] = row[1:]
+                elif lead:
+                    marks.append((lead, None))
+                else:
+                    e = margin_mark(row); marks.append((e['text'].strip(), e) if e is not None else (None, None))
+            if len({m for m, _ in marks if m}) < 2: return None
+            parts = []
+            for row, (m, e) in zip(prows, marks):
+                src = trace_row(fpage['page'], row, ' '.join(x['text'].strip() for x in row))
+                if m or not parts: parts.append([e, [src]])
+                else: parts[-1][1].append(src)
+            out_parts = [(e, trace_src(J.lines([str(x) for x in srcs]), srcs)) for e, srcs in parts]
+            if taken_out and out_parts:
+                e0, p0 = out_parts[0]; out_parts[0] = (e0, trace_partial(str(p0), parts[0][1] + taken_out))
+            return out_parts
+        expanded = []
+        for t in article_info:
+            split = split_at_margin_marks(t)
+            expanded += [(m, part) for m, part in split] if split else [(None, t)]
+        for forced, t in expanded:
+            plain = _SENTINEL.sub('', str(t)).lstrip()
+            nmark = next((m for m in note_marks if plain.startswith(m) and plain[len(m):len(m) + 1] != m[0]), None)
+            nbody = plain[len(nmark):].strip() if nmark else ''
+            beside = forced if not nmark else None
+            if beside is not None: nmark, nbody = beside['text'].strip(), plain
+            elif not nmark and re.match(r'(?:Correspond\w*|Corresponding authors?|Author for correspondence|E-?mail)\b', plain, re.I):
+                beside = mark_beside(t)
+                if beside is not None: nmark, nbody = beside['text'].strip(), plain
+            if not nmark or not re.match(r'[^\W\d_]', nbody):
+                kept_info.append(t); continue
+            if any(compact(nbody) == compact(b) for _, _, b, _ in author_notes): continue   # N4: printed once
+            author_notes.append((nmark, t, nbody, beside))
+        if author_notes: article_info = kept_info
+        noted = {m for m, _, _, _ in author_notes} | set(au.get('author_note_marks', [])) | {n.get('marker') for n in au.get('author_notes', [])}
+        for m in sorted(name_marks - aff_marks - noted):
+            _line = next((i + 1 for i, l in enumerate(out) if l.startswith('**Authors:**')), None)
+            doubt_list().add('N7', pages[front_index]['page'], au.get('author_box_px') or [0, 0, 0, 0], 'mark_without_affiliation_or_note', line=_line)
+    if author_notes:
+        note_block = ['', '**Author notes:**']
+        trace_lines(note_block, 1, 'notice', generated='program author-notes label')
+        beside_runs = set()
+        for nmark, t, nbody, beside in author_notes:
+            ntext = (nmark + ' ' + str(t).lstrip()) if beside is not None else str(t).lstrip()
+            note_block.append('- ' + re.sub(r'^[*#]+', lambda x: x[0].replace('*', r'\*').replace('#', r'\#'), ntext))
+            trace_lines(note_block, len(note_block) - 1, 'article_information', t, group=trace_group(),
+                        runs=[(pages[front_index]['page'], beside['id'], False)] if beside is not None else ())
+            if beside is not None: beside_runs.add(beside['id'])
+            # (a letter left of a sign-and-letter mark, "¤a Current address: ...", is part of the mark)
+            if shared_boxer().symbol_address(re.sub(r'^[a-z](?=\s*[A-Z])\s*', '', nbody)):
+                note_block.append('[Author note not verified: it names an institution and may be an affiliation; check the PDF.]')
+                trace_lines(note_block, len(note_block) - 1, 'notice', generated='program author-note flag')
+                doubt_list().add('N8', pages[front_index]['page'], au.get('affiliation_box_px') or au.get('author_box_px') or [0, 0, 0, 0],
+                                 'note_or_affiliation_not_told_apart')
+        out[notes_at:notes_at] = note_block
+        # a mark now printed with its note is not printed again on a line of its own: not as an article-information
+        # record (memo 2 M7), not among the rows not placed, not in the page's own reading of the front page (memo 1 M5)
+        def only_marks(x):
+            segs = [sg for sg in trace_segs(x) if _TRACE['rows'][sg[0]]['page'] == pages[front_index]['page']]
+            return bool(segs) and all(set(_TRACE['rows'][r]['runs']) <= beside_runs for r, a, c in segs)
+        if beside_runs:
+            article_info = [x for x in article_info if not only_marks(x)]
+        if beside_runs and per_page:
+            fb = []
+            for b in per_page[front_index][0]:
+                keep = [i for i, line in enumerate(b.get('lines', [])) if not (trace_segs(line) and all(
+                    set(_TRACE['rows'][r]['runs']) <= beside_runs for r, a, c in trace_segs(line)))]
+                if not keep: continue
+                n0 = len(b['lines'])
+                if len(keep) != n0:
+                    b = dict(b)
+                    for key in ("lines", "lefts", "sizes", "row_boxes", "emphasis", "faces", "prefixes"):
+                        if key in b and isinstance(b[key], list) and len(b[key]) == n0: b[key] = [b[key][i] for i in keep]
+                    b["first"] = b["lines"][0]
+                    if "row_boxes" in b: b["meta"] = dict(b.get("meta", {}), lines=len(keep), box_px=hull(b["row_boxes"]))
+                fb.append(b)
+            per_page[front_index] = (fb, per_page[front_index][1], per_page[front_index][2])
+        if beside_runs:
+            unplaced_front = [[line for line in group if not (trace_segs(line) and all(
+                set(_TRACE['rows'][r]['runs']) <= beside_runs for r, a, b in trace_segs(line)))] for group in unplaced_front]
+            unplaced_front = [group for group in unplaced_front if group]
     def keyword_units(kw, t):
         # A labelled keyword strip: its printed label and its list are one source text.
         g = trace_group()
@@ -20922,14 +25831,20 @@ def main(paper_dir):
             label = pages[front_index].get('_article_info_label', 'Article information') if pages else 'Article information'
             out += ["", "## " + label, ""]
             trace_lines(out, len(out)-2, 'heading', label, generated=None if isinstance(label, Src) else 'program section label')
-        keyword_list=panel_list=False
+        keyword_list=panel_list=after_label=False
         for t in article_info:
             if re.fullmatch(r'Key\s*(?:words|points)\s*:?\s*',t,re.I):
                 out += ['', '## '+t.rstrip(':'), '']
                 trace_lines(out, len(out)-2, 'heading', t)
                 keyword_list=bool(re.fullmatch(r'Key\s*words\s*:?',t,re.I))
-                panel_list=True
+                panel_list=True; after_label=True
                 continue
+            if after_label and not re.match(r'^[•●◦]',t) and keyword_term_list(t):
+                # memo artinfo-1 (M1): the list under its label row is printed under the label's heading
+                out.append(t); trace_lines(out, len(out)-1, 'article_information', t)
+                after_label=False; keyword_list=False
+                continue
+            after_label=False
             if panel_list and not re.match(r'^[•●◦]',t):
                 out += ['', '## Article information', '']
                 trace_lines(out, len(out)-2, 'heading', generated='program section label')
@@ -20962,7 +25877,7 @@ def main(paper_dir):
         out += ['```']
     abstract_group = trace_group()
     abstract_items = [{"kind": "para", "text": trace_src(part.strip(), side_abstract), "page": 1, "abstract": True,
-                       "_trace_group": abstract_group} for part in ABSTRACT_PARTS.split(side_abstract)] if side_abstract else []
+                       "_trace_group": abstract_group} for part in (RUNIN_PART_SPLIT if side_abstract_runin else ABSTRACT_PARTS).split(side_abstract)] if side_abstract else []
     if not au: uncertain.append("title and authors: no authors.json (rule 8 not run)")
     elif (au.get("checks") or {}).get("status") != "verified":
         title_page = (f"page {pages[front_index]['page']}" if any(p.get('repository_cover') for p in pages)
@@ -21051,6 +25966,11 @@ def main(paper_dir):
                 if a: part['first'] = part['lines'][0]
                 section_blocks.append(part)
         for b in section_blocks:
+            if b.get('_box_kind') == 'formula':
+                # O16, O29-O31: a display formula is an item of its own; no paragraph joins across it or takes it in
+                items.append(dict(kind='formula', text=J.lines(b['lines']), rows=list(b['lines']), page=b['page'],
+                                  box=b['meta']['box_px'], stacked=b['_formula']['stacked'], barrier=True))
+                continue
             if b.get('_box_kind'):
                 kind=b['_box_kind']; text=J.lines(b['lines'])
                 if kind=='grid':
@@ -21071,8 +25991,11 @@ def main(paper_dir):
             if b.get('_side_abstract'):
                 joined = J.lines(b['lines']); group = trace_group()
                 printed_label = re.match(r'^(?:Abstract|Summary)\b', joined, re.I)
-                items.append(dict(kind='heading',text=trace_src('Abstract', joined) if printed_label else 'Abstract',
-                                  page=b['page'],_trace_group=group if printed_label else None))
+                # lane r6-abstract (B8): with no printed label and no run-in labels, the block is no abstract
+                # block: it opens the body, under no generated "Abstract" heading
+                if printed_label or re.match(r'^(?:Objectives?|Aims?|Background|Purpose|Introduction|Materials and [Mm]ethods|Methods?)\s*:', joined):
+                    items.append(dict(kind='heading',text=trace_src('Abstract', joined) if printed_label else 'Abstract',
+                                      page=b['page'],_trace_group=group if printed_label else None))
                 text = trace_src(re.sub(r'^(?:Abstract|Summary)\s*:?\s*','',joined,flags=re.I), joined)
                 for part in re.split(r'\s+(?=Key\s*words\s*:)',text,flags=re.I):
                     items.append(dict(kind='para',text=trace_src(part, text),page=b['page'],abstract=True,barrier=True,
@@ -21088,7 +26011,10 @@ def main(paper_dir):
                     for part in re.split(r'\s+(?=(?:SCHL[UÜ]SSELW[OÖ]RTER|PALABRAS\s+CLAVES|PALAVRAS[- ]CHAVE)\s*:)',text,flags=re.I):
                         items.append(dict(kind='para',text=trace_src(part, text),page=b['page'],barrier=True,_trace_group=group))
                 continue
-            if b.get('_abstract') and not any(it['kind']=='heading' and re.fullmatch(r'Abstract|Summary', it['text'], re.I) for it in items):
+            # lane r6-abstract (B1): the block's own printed label (its first row, alone or run in) is its
+            # label; no second, generated heading is added in front of it
+            if (b.get('_abstract') and not any(it['kind']=='heading' and re.fullmatch(r'Abstract|Summary', it['text'], re.I) for it in items)
+                    and not (str(b['meta'].get('why') or '').startswith('labelled abstract separated') and re.match(r'\s*(?:Abstract|Summary)\b', str(b['lines'][0]), re.I))):
                 items.append(dict(kind='heading', text='Abstract', page=b['page']))
             if p is pages[front_index]:
                 original = J.lines(b["lines"])
@@ -21108,7 +26034,8 @@ def main(paper_dir):
             # cells, AI09 Table 8) neither heads nor opens a reference list.
             header_cell = bool(b["meta"].get("table_header_cell"))
             if not header_cell and (REF_HEAD.fullmatch(first_line) or REF_LIST_HEAD.fullmatch(first_line) or in_refs and REF_END.fullmatch(first_line) or LETTER_HEAD.fullmatch(first_line) or first_line.upper() in ("ORCID", "CLINICAL RELEVANCE", "CLINICAL SIGNIFICANCE")):
-                items.append({"kind": "heading", "text": first_line, "page": b["page"]})
+                items.append({"kind": "heading", "text": first_line, "page": b["page"],
+                              **({'_r8_top': b['meta']['box_px'][1]} if (b.get('meta') or {}).get('box_px') else {})})
                 in_refs = bool(REF_HEAD.match(first_line) or REF_LIST_HEAD.fullmatch(first_line)); in_orcid = first_line.upper() == "ORCID"
                 b = dict(b)
                 for key in ("lines", "lefts", "sizes", "row_boxes", "emphasis", "faces", "prefixes"):
@@ -21134,7 +26061,31 @@ def main(paper_dir):
             if in_orcid and "orcid.org" in text:
                 add_orcid(b["lines"], b["page"]); continue
             in_orcid = False
-            for part in paragraph_blocks(b, body):
+            subs = [b]
+            parts_all = [pt for sb in subs for pt in paragraph_blocks(sb, body)]
+            if p is pages[front_index]:
+                # lane r6-abstract (B4): on the front page the abstract ends at a Keywords line. Where the
+                # program's own paragraph reader left a Keywords row inside a paragraph (not its first row), the row
+                # and the list rows under it are cut off that paragraph and printed as the program prints a keyword
+                # strip (its label as a heading, the list under it). The label opens a line of its own: a capital
+                # first letter, under a row that closes a sentence, with abstract prose (30 words or more, a
+                # sentence end) above it in the block. A paragraph the reader already ended there is left as it is.
+                expanded, above = [], []
+                for pt in parts_all:
+                    L = pt['lines']
+                    kw_at = next((i for i in range(1, len(L)) if KEYWORDS_ROW.match(str(L[i]))
+                                  and str(L[i]).lstrip()[:1] in 'KI' and re.search(r'[.!?)\]]\s*$', str(L[i-1]))), None)
+                    prose = ' '.join(above + [str(x) for x in L[:kw_at or 0]])
+                    if kw_at is not None and len(prose.split()) >= 30 and re.search(r'[a-z)][.!?]', prose):
+                        expanded += [slice_part(pt, 0, kw_at), {'_kw_tail': slice_part(pt, kw_at, len(L))}]
+                    else:
+                        expanded.append(pt)
+                    above += [str(x) for x in L]
+                parts_all = expanded
+            for part in parts_all:
+                if part.get('_kw_tail') is not None:
+                    emit_keyword_record(items, part['_kw_tail'], b['page'], body, J)
+                    continue
                 lines = part["lines"]; text = J.lines(lines)
                 if "|" in text[:12]: text = trace_src(re.sub(r"\s*\|\s*", " ", text).strip(), text)
                 abstract_label=p['page']==1 and re.match(r'^(?:Objectives?|Aims?|Background|Materials?(?: and Methods)?|Methods|Results|Conclusions?|Study analysis|Clinical (?:implications|relevance|significance))\s*:\s*\S',text)
@@ -21203,7 +26154,9 @@ def main(paper_dir):
                           "top": top, 'left':fb[0] if fb else 0, **placement})
         if p is not pages[front_index]:
             for txt in side:
-                if in_refs and not end_address_note(txt): add_refs({"lines": txt, "lefts": [0] * len(txt), "page": p["page"]})
+                # F17 (lane r5-turned): turned side text is kept apart at its page position, never added to an entry
+                if in_refs and not end_address_note(txt) and not isinstance(txt, TurnedSide):
+                    add_refs({"lines": txt, "lefts": [0] * len(txt), "page": p["page"]})
                 else: items.append({"kind": "side", "text": J.lines(txt), "page": p["page"]})
         for txt in p.get('_pull_quotes', []): items.append({"kind": "side", "text": J.lines(txt), "page": p["page"], "pull_quote": True})
         if image_only_page(p):
@@ -21234,13 +26187,18 @@ def main(paper_dir):
             uncertain.append(f"page {front_no}: an article-information row continues the body sentence ending "
                              f"{json.dumps(str(items[k]['text'])[-30:], ensure_ascii=False)} and was returned to it; check against the PDF")
         else:
-            # No single paragraph it continues: it stays article information, as printed.
-            lines = ([] if info_written else ['', '## Article information']) + ['', '- ' + held['text']]
+            # No single paragraph it continues. Lane r6-artinfo, rule I5: an entry with no label and a
+            # lowercase opening word is not article information; its rows are quoted as printed in the
+            # flagged block (I14's form) at the article information's place and listed as doubtful.
+            lines = ['', '**Front-page text as printed (not placed)**', '',
+                     '[The program could not place these first-page lines; source lines follow in printed order.]',
+                     '', '```text', held['text'], '```']
             out[info_pos:info_pos] = lines
-            if not info_written:
-                trace_lines(out, info_pos+1, 'heading', 'Article information', stop=info_pos+2, generated='program section label')
-                info_written = True
-            trace_lines(out, info_pos+len(lines)-1, 'article_information', held['text'], stop=info_pos+len(lines))
+            trace_lines(out, info_pos+1, 'notice', generated='program front-matter explanation', stop=info_pos+4)
+            trace_lines(out, info_pos+6, 'front_matter_printed', held['text'], stop=info_pos+7)
+            doubt_list().add('I5', front_no, held['box'], 'unlabelled_lowercase_entry_not_placed')
+            uncertain.append(f"page {front_no}: rows that open with a lowercase word and no label continue no single body "
+                             "paragraph; quoted under Front-page text as printed (not placed)")
             info_pos += len(lines)
     reference_systems = check_reference_systems(items, uncertain)
     with open(os.path.join(paper_dir, 'copy.references.json'), 'w') as stream:
@@ -21287,6 +26245,9 @@ def main(paper_dir):
             text = it["text"]
             unit_kind = 'abstract_part' if it.get('abstract') else 'list_item' if it.get('list') else 'paragraph'
             keyword=re.match(r'^(Key\s*words)\s*:\s*(.+)',text,re.I)
+            if it.get('keywords_split'):
+                # lane r6-abstract (B4): a keyword record cut off the abstract's block: its printed label, then the list
+                keyword = re.match(r'^\s*(Key\s*-?\s*words?|Keywords|Index\s+terms)\s*[:.]?(?:\s*:)?\s*(\S.*)$', text, re.I | re.S)
             if keyword:
                 group = group or trace_group()
                 out += ['', '## '+keyword[1]]; trace_lines(out, len(out)-1, 'heading', text, group=group)
@@ -21310,6 +26271,12 @@ def main(paper_dir):
                 text=re.sub(r'^([*#])',lambda m:'\\'+m[1],text)
             out += ["", text]
             trace_lines(out, len(out)-1, unit_kind, it['text'], group=group)
+        elif it['kind']=='formula':
+            # one block: a simple formula on one line (O29), a stacked one row by row, top to bottom (O30)
+            rows = it['rows'] if compact(' '.join(map(str, it['rows']))) == compact(str(it['text'])) else [it['text']]
+            out.append(''); start = len(out)
+            out += [str(r).strip() for r in rows if str(r).strip()]
+            trace_lines(out, start, 'paragraph', rows, group=group)
         elif it['kind']=='definition':
             out += ['', '- **'+it['term']+'**: '+it['text']]
             trace_lines(out, len(out)-1, 'list_item', [it['term'], it['text']], group=group)
@@ -21352,7 +26319,7 @@ def main(paper_dir):
             output_start=len(out)
             caption=J.lines(it['caption'].split(chr(10)))
             caption_fragment=''
-            if it.get('table_gate') and not re.match(r'^(?:(?:Supplemental|Supplementary)\s+)?Table\s+S?'+TABLE_NUMBER+r'\b',caption,re.I):
+            if it.get('table_gate') and not (re.match(r'^(?:(?:Supplemental|Supplementary)\s+)?Table\s+S?'+TABLE_NUMBER+r'\b',caption,re.I) or r8_label_line(caption)):   # round 8: the wide label list (TF7)
                 out += ['', '**Table (no caption)**']
                 if 'no caption' not in caption.lower(): caption_fragment=caption
             else: out += ["", f"**{caption}**"]
@@ -21384,7 +26351,15 @@ def main(paper_dir):
             elif it["rows"]:
                 out.extend(table_markdown(it["rows"], J))
             notes_start=len(out)
-            if it.get("notes"): out += ["", J.lines(it["notes"])]
+            if it.get("notes") and it.get('_r8_printed'):
+                # (r8-overlay) a grid printed from the overlay: a note line ending in a web address is parted from the
+                # next line, as the flagged list parts its lines, not joined to it as a broken address
+                segs=[[]]
+                for n in it['notes']:
+                    segs[-1].append(n)
+                    if re.search(r'(?:https?://|www\.)\S+$',n.strip()): segs.append([])
+                out += ["", ' '.join(J.lines(sg) for sg in segs if sg)]
+            elif it.get("notes"): out += ["", J.lines(it["notes"])]
             # Tables retain an uninterrupted caption/gate/grid sequence for
             # the reader-agreement parser; figure files follow their caption.
             if it['kind']=='figure':out.insert(output_start+2+len(subcaption_lines),float_marker(it,index))
@@ -21392,6 +26367,41 @@ def main(paper_dir):
             if it['kind']=='table':
                 out[output_start:]=table_raised_marks(out[output_start:],it,next(p for p in pages if p['page']==it['page']))
             trace_float(out, output_start, body_start, notes_start, it, caption, caption_fragment)
+            if it.get('figure_text_runs'):
+                # F12 (lane r5-floatspace): the figure's words that the figure space took out of the body, printed
+                # under the figure in reading order (a row joins only runs side by side on one line), each row
+                # claiming its own runs
+                fpage = next(q for q in pages if q['page'] == it['page'])
+                fruns = {e['id']: e for e in fpage['elements'] if e.get('kind') == 'text'}
+                ws = [fruns[m] for m in dict.fromkeys(it['figure_text_runs']) if m in fruns]
+                if it.get('r8_figure_shapes'):
+                    # round 8 (lane r8-box): words a drawing moved out of a table float draws as shapes print here, as
+                    # they printed in the table (read by OCR and marked, or marked unreadable)
+                    ws = ws + shape_text_runs(fpage, list(ws))[0]
+                ws = sorted(ws, key=lambda e: ((e['box_px'][1] + e['box_px'][3]) / 2, e['box_px'][0]))
+                frows = []
+                for e in ws:
+                    c = (e['box_px'][1] + e['box_px'][3]) / 2
+                    h = max(4.0, e['box_px'][3] - e['box_px'][1])
+                    near = [r for r in frows if abs(c - r[0]) <= .4 * h and
+                            any(-h <= e['box_px'][0] - x['box_px'][2] <= h or -h <= x['box_px'][0] - e['box_px'][2] <= h for x in r[1])]
+                    if near:
+                        near[0][1].append(e)
+                    else:
+                        frows.append([c, [e]])
+                if frows:
+                    out += ['', '[Figure text as printed, in reading order]']
+                    trace_lines(out, len(out)-1, 'notice', stop=len(out), generated='program figure text notice')
+                    out.append('')
+                    for _, row in sorted(frows, key=lambda r: (round(r[0] / 4), min(x['box_px'][0] for x in r[1]))):
+                        row.sort(key=lambda e: e['box_px'][0])
+                        line = re.sub(r'([\\`*_\[\]<>|#])', r'\\\1', ' '.join(e['text'].strip() for e in row))
+                        real = [e for e in row if e['id'] in fruns]
+                        if real:
+                            out.append(trace_mark(line, 'figure_text', runs=[(it['page'], e['id'], False) for e in real]) + '  ')
+                        else:   # round 8: a row of drawn-shape labels only (OCR or unreadable marks): a program line
+                            out.append(line + '  ')
+                            trace_lines(out, len(out)-1, 'notice', generated='program drawn-shape label reading')
         if it.get('_catalog_marker'):out += [it['_catalog_marker']]
     text = "\n".join(out)
     for p in pages:
@@ -21562,9 +26572,38 @@ def main(paper_dir):
         items+float_extras+[it for s in scan_sections.values() for it in s['float_items']],
         pages,table_decisions)
     path=finish_float_copy(paper_dir,path)
+    float_number_doubts(paper_dir, pages, path)
     trace_finish(paper_dir, path, pages)
+    sign_doubts(paper_dir, pages)
     if pcl_writer: pcl_writer.write(paper_dir, table_pdf_path(paper_dir), pcl_sources, pages)
+    for p in pages:   # O30, O31: the formulas the last reading of each page listed
+        for d in p.get('_formula_doubts', []): doubt_list().add(d['rule'], d['page'], d['box'], d['reason'])
+    for page, box, n in F18_DOUBTS: doubt_list().add('F18', page, box, 'turned_line_outside_float:%d' % n)   # lane r5-turned
+    pairing_doubts(path)   # rules TP1 to TP3 (round 7, lane r7-pairing)
+    for p in pages:   # lane r6-abstract (S12): a tall initial A or I before a small letter: joined, or a word of its own
+        seen = set()
+        for d in p.get('_r6_initial_doubts', []):
+            key = tuple(round(v) for v in d['box'])
+            if key in seen: continue
+            seen.add(key)
+            doubt_list().add('S12', p['page'], d['box'], 'tall_initial_word_or_letter',
+                             options=['first letter of the next word', 'a word of its own'])
+    doubt_list().write(paper_dir)   # round 5: written once, at the end of the paper, after every lane's entries
     return path
+
+
+def sign_doubts(paper_dir, pages):
+    """Rules O22 (two readings) and O28 (never silent), lane r5-signs: tools/sign_rules.py lists the doubtful sign
+    places of the written copy outside floats in the doubt list; copy.md and its trace stay as written."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('_copy_sign_rules', os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'tools', 'sign_rules.py'))
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        mod.run(paper_dir, pages, table_pdf_path(paper_dir), table_characters, _doubts())
+    except Exception:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
 
 
 if __name__ == "__main__":

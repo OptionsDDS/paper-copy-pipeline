@@ -143,7 +143,9 @@ class TitleSelection(unittest.TestCase):
 
     def test_running_title_without_lower_byline_is_not_a_banner(self):
         self.assertFalse(self.select(margin=True,lower=False).get('title_reselected'))
-        self.assertFalse(self.select().get('title_reselected'))
+        # Round 6 rule T6 (user's ruling 2026-11-13) supersedes the earlier expectation here: one word in large type
+        # ("Materials") is not the title when a longer block in large type stands in the top half of the page.
+        self.assertTrue(self.select().get('title_reselected'))
 
 
 if __name__ == '__main__': unittest.main()

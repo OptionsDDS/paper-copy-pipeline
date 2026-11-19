@@ -488,7 +488,7 @@ Rule 8 (title, authors and affiliations): on the first text page, after rules 6-
         stderr line, exit 0. byline_lines retains each selected source row and its run IDs even
         when parsing fails. Full statement in authors_and_affiliations().
 """
-import json, sys, argparse, statistics, math, collections, os, subprocess
+import json, sys, argparse, statistics, math, collections, os, subprocess, string
 
 # ---------------------------------------------------------------------------------------------
 # Self-contained bootstrap: standard library plus standalone/vendor only, vendored files patched
@@ -897,6 +897,19 @@ for _start, _names in (
     (241, "angleright integral integraltp integralex integralbt parenrighttp parenrightex parenrightbt bracketrighttp bracketrightex bracketrightbt bracerighttp bracerightmid bracerightbt"),
 ):
     SC_SYMBOL_NAMES.update(enumerate(_names.split(), _start))
+# The ZapfDingbats encoding, codes to Unicode, as Unicode publishes it (MAPPINGS/VENDORS/ADOBE/zdingbat.txt); its
+# glyph names (a1 ... a191) are not in the Adobe Glyph List, so the code is the published witness.
+SC_ZAPF_UNICODE = {}
+for _start, _row in (
+    (0x20, " ✁✂✃✄☎✆✇✈✉☛☞✌✍✎✏✐✑✒✓✔✕✖✗✘✙✚✛✜✝✞✟"), (0x40, "✠✡✢✣✤✥✦✧★✩✪✫✬✭✮✯✰✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿"),
+    (0x60, "❀❁❂❃❄❅❆❇❈❉❊❋●❍■❏❐❑❒▲▼◆❖◗❘❙❚❛❜❝❞"), (0xa1, "❡❢❣❤❥❦❧♣♦♥♠①②③④⑤⑥⑦⑧⑨⑩❶❷❸❹❺❻❼❽❾❿"),
+    (0xc0, "➀➁➂➃➄➅➆➇➈➉➊➋➌➍➎➏➐➑➒➓➔→↔↕➘➙➚➛➜➝➞➟"), (0xe0, "➠➡➢➣➤➥➦➧➨➩➪➫➬➭➮➯"), (0xf1, "➱➲➳➴➵➶➷➸➹➺➻➼➽➾"),
+):
+    SC_ZAPF_UNICODE.update(enumerate(_row, _start))
+# Rule O23 (lane r5-signs): the two standard sign faces have fixed published tables. A face of that name drawn from
+# the reader's own font (no embedded program) whose PDF encoding names no base encoding is read through its own
+# table, as PDFium reads base-14 Symbol and ZapfDingbats: never through StandardEncoding's Latin letters.
+SC_SIGN_FACES = ("Symbol", "ZapfDingbats")
 SC_STATS = collections.Counter()   # reading-layer counts for the report (fallbacks, limits met)
 
 # Only semantic names of the selected glyph can contradict a usable text layer.
@@ -1044,6 +1057,7 @@ class SCFont:
     """One font dictionary: its codes, widths, Unicode text and glyph boxes, as PDFium reads them."""
     def __init__(self, spec, pdffont, doc):
         self.spec, self.pf = spec, pdffont
+        self.sign_face_table = None
         self.subtype = literal_name(resolve1(spec.get("Subtype"))) if spec.get("Subtype") else ""
         self.basefont = literal_name(resolve1(spec.get("BaseFont"))) if spec.get("BaseFont") is not None else ""
         if not isinstance(self.basefont, str): self.basefont = str(self.basefont)
@@ -1102,6 +1116,8 @@ class SCFont:
             if wa is None and self.prog is None:   # a standard-14 font without Widths: its AFM widths, by the encoding's letter
                 fm = SC_FONT_METRICS.get(self.basefont.split("+")[-1])
                 if fm: self.cw = {c: int(fm[1][u]) for c, u in self.euni.items() if u in fm[1]}
+                if fm and self.sign_face_table == "ZapfDingbats":   # the library keys this face's widths by code
+                    self.cw = {c: int(fm[1][chr(c)]) for c in range(256) if chr(c) in fm[1]}
                 SC_STATS["standard14_widths:" + self.basefont] += 1
         self.uni_cache = {}
 
@@ -1114,6 +1130,10 @@ class SCFont:
         if self.subtype in ("Type1", "MMType1") and not symbolic: base = "StandardEncoding"
         self.diff = {}
         enc = resolve1(self.spec.get("Encoding"))
+        face = re.sub(r"^[A-Z]{6}\+", "", self.basefont)
+        # O23: a standard sign face without its own program and without a named base encoding reads its own table
+        self.sign_face_table = face if (face in SC_SIGN_FACES and not embedded and self.subtype in ("Type1", "MMType1") and
+                                        (enc is None or isinstance(enc, dict) and enc.get("BaseEncoding") is None)) else None
         if enc is None:
             if self.basefont == "Symbol": base = "Symbol"
             elif not embedded and base == "builtin": base = "WinAnsiEncoding"
@@ -1133,11 +1153,16 @@ class SCFont:
                 elif isinstance(v, PSLiteral):
                     if 0 <= code <= 255: self.diff[code] = literal_name(v)
                     code += 1
+        if self.sign_face_table: base = self.sign_face_table
         self.base = base
         self.gmap, self.euni = {}, {}   # code -> glyph id; code -> Unicode from the encoding (PDFium's m_Encoding)
         for code in range(256):
             n = self.adobe_name(code)
             if n: self.euni[code] = sc_uni(n)[:1]
+            if self.sign_face_table and code not in self.euni:   # O23: the face's published table
+                u = (sc_uni(SC_SYMBOL_NAMES[code]) if code in SC_SYMBOL_NAMES and code not in self.diff else "")[:1] \
+                    if self.sign_face_table == "Symbol" else (SC_ZAPF_UNICODE.get(code, "") if code not in self.diff else "")
+                if u: self.euni[code] = u
         if self.prog is not None: (self._tt_map if self.prog_kind == "truetype" else self._t1_map)()
 
     def adobe_name(self, code):
@@ -2430,7 +2455,7 @@ def sc_read_page(pdf_path, page_no):
         if ang < 0: ang += 2 * math.pi
         chars.append({"text": ch, "x0": px(l), "y0": px(h - t), "x1": px(r_), "y1": px(h - b), "origin": (px(org[0]), px(h - org[1])),
                       "size": px(o["fs"] * (scale if scale > 0 else 1.0)), "angle": round(-math.degrees(ang)) % 360,
-                      "font": o["font"].basefont, "hidden": hidden, "page": page_no,
+                      "font": o["font"].basefont, "font_key": id(o["font"]), "hidden": hidden, "page": page_no,
                       "source_code": code, "paint_order": paint_order,
                       "render_mode": o["render"], "fill_alpha": o["alpha"], "fill_color": o.get("fill_color"),
                       "fill_space": o.get("fill_space"), "line_end_hyphen": line_end_hyphen, "dropped_control": dropped_control,
@@ -2769,10 +2794,78 @@ def split_display_face_lines(lines, objs, to_read):
     lines.sort(key=lambda L: L["vb"])
     return lines
 
-def lines_and_runs(chars, angle, objs, to_read, baseline_v):
+def stacked_script_order(cs, size, barred=None):
+    """O20/O21 (lane r5-line): a lowered and a raised group stacked on one letter are each written whole, right after
+    that letter: the lowered group first, then the raised one (a choice; the rules name no order for two tiers).
+    Left-edge order alone would interleave their characters ("γLsW" for a γ carrying s below and LW above).
+    A script is a character smaller than superscript_em of the line's size whose baseline lies more than a tenth of
+    the size above or below the median baseline of the line's full-size characters; a group is a run of one tier's
+    characters with no full-size character and no gap over 0.3 of the size between them. Lines without two
+    overlapping groups of opposite tiers keep their left-edge order unchanged."""
+    full = [c for c in cs if c["size"] >= PARAMS["superscript_em"] * size]
+    small = [c for c in cs if c["size"] < PARAMS["superscript_em"] * size]
+    if len(full) < 2 or len(small) < 2: return cs
+    base = statistics.median(c["vb"] for c in full)
+    def tier(c):
+        if c["size"] >= PARAMS["superscript_em"] * size: return None
+        if c["vb"] < base - 0.1 * size: return "up"
+        if c["vb"] > base + 0.1 * size: return "down"
+        return None
+    groups = []
+    for t in ("down", "up"):
+        cur = []
+        for c in cs:   # cs is in left-edge order
+            k = tier(c)
+            if k is None and c["size"] >= PARAMS["superscript_em"] * size:
+                if cur: groups.append((t, cur)); cur = []
+                continue
+            if k != t: continue
+            if cur and c["u0"] - max(d["u1"] for d in cur) > 0.3 * size:
+                groups.append((t, cur)); cur = []
+            cur.append(c)
+        if cur: groups.append((t, cur))
+    def span(g): return min(c["u0"] for c in g), max(c["u1"] for c in g)
+    key = {}
+    for td, gd in groups:
+        if td != "down": continue
+        for tu, gu in groups:
+            if tu != "up": continue
+            (a0, a1), (b0, b1) = span(gd), span(gu)
+            if min(a1, b1) <= max(a0, b0): continue
+            if barred is not None and barred(gu, gd): continue   # a fraction (a drawn bar between the tiers) stays as it was
+            start = min(a0, b0)
+            for rank, g in ((0, gd), (1, gu)):
+                for i, c in enumerate(sorted(g, key=lambda c: c["u0"])): key[id(c)] = (start, rank, i)
+    if not key: return cs
+    return sorted(cs, key=lambda c: key.get(id(c), (c["u0"], -1, 0)))
+
+
+def lines_and_runs(chars, angle, objs, to_read, baseline_v, keep_zones=(), bars=None):
     """Lines and x-ordered runs, with small markers re-homed by their body band.
     Each two-font overlap keeps its last painted character; covered characters leave run text.
+    keep_zones (page px boxes; lane r5-line): inside a table or figure found on a first build of the page, the
+    lane's O20/O21 changes are not applied (the inside of a float is out of the lane's scope); characters whose
+    centre lies in a zone keep the earlier behaviour. Characters the lane's changes touched are marked "r5_line".
     """
+    # horizontal drawn rules (reading frame): a short bar between a raised and a lowered tier is a fraction bar
+    # (a stacked formula, O30): the lane's O21 stacking leaves such a place as it was
+    hbars = []
+    for o in (objs if bars is None else bars):   # bars: every thin drawn object, art included (lane r5-line)
+        if o["kind"] != "rule": continue
+        u0_, v0_, u1_, v1_ = to_read(*o["box_px"])
+        if (u1_ - u0_) > (v1_ - v0_): hbars.append((u0_, v0_, u1_, v1_))
+    def barred(up, down):
+        """a drawn bar lies between the two groups of characters (one above it, one below it) and spans them"""
+        if not hbars or not up or not down: return False
+        a0 = min(c["u0"] for c in up + down); a1 = max(c["u1"] for c in up + down)
+        top = max(c["v1"] for c in up); bottom = min(c["v0"] for c in down)
+        lo_, hi_ = min(top, bottom), max(top, bottom)
+        return any(b[0] <= a1 and b[2] >= a0 and lo_ - 0.5 * max(c["size"] for c in up + down) <= (b[1] + b[3]) / 2 <= hi_ + 0.5 * max(c["size"] for c in up + down)
+                   for b in hbars)
+    def kept(c):
+        if not keep_zones: return False
+        cx, cy = (c["x0"] + c["x1"]) / 2, (c["y0"] + c["y1"]) / 2
+        return any(z[0] <= cx <= z[2] and z[1] <= cy <= z[3] for z in keep_zones)
     for c in chars:
         c["u0"], c["v0"], c["u1"], c["v1"] = to_read(c["x0"], c["y0"], c["x1"], c["y1"])
         c["vb"] = baseline_v(c)
@@ -2899,6 +2992,36 @@ def lines_and_runs(chars, angle, objs, to_read, baseline_v):
     # and never overlap it horizontally: fold such a line into its neighbour
     def u_overlap(a, b):   # substantial: more than a third of the narrower letter
         return any(min(ca["u1"], cb["u1"]) - max(ca["u0"], cb["u0"]) > 0.34 * min(ca["u1"] - ca["u0"], cb["u1"] - cb["u0"]) for ca in a["chars"] for cb in b["chars"])
+    def script_tier_free(a, b):
+        """O21 (lane r5-line): a lowered piece under a raised one (or a raised piece over a lowered one) on the same
+        letter of b stacks with it; the other tier's small characters of b do not bar the fold. Only for a script
+        piece: at most eight characters, no word of three letters, every character small (by superscript_em), on one
+        side of b's baseline, and each of its characters under or over a small character of b of the other tier
+        (measured: AT16 p2, a subscript under a superscript on one Greek letter left its word and went to the next
+        sentence)."""
+        cs_ = a["chars"]
+        if any(kept(c) for c in cs_): return b
+        if not cs_ or len(cs_) > 8 or re.search(r"[^\W\d_]{3,}", "".join(c["text"] for c in sorted(cs_, key=lambda c: c["u0"]))): return b
+        # small against the letters of b (the median size of its letters and digits, not its largest character:
+        # a short last line of a reference entry is in the size of the line it would join and stays a line)
+        body = [d["size"] for d in b["chars"] if d["text"].isalnum()]
+        ref = statistics.median(body) if body else b["size"]
+        if not all(c["size"] < PARAMS["superscript_em"] * ref for c in cs_): return b
+        side = statistics.median(c["vb"] for c in cs_) - b["vb"]
+        if abs(side) <= 0.1 * b["size"]: return b
+        other = [d for d in b["chars"] if d["size"] < PARAMS["superscript_em"] * b["size"] and (d["vb"] - b["vb"]) * side < 0 and abs(d["vb"] - b["vb"]) > 0.1 * b["size"]]
+        if not other or not all(any(min(c["u1"], d["u1"]) > max(c["u0"], d["u0"]) for d in other) for c in cs_): return b
+        if barred(*((other, cs_) if side > 0 else (cs_, other))): return b
+        # a script overlaps the height of the line it joins and stands next to or over a full letter of it (memo
+        # line-holdback-2: a short line of digits a full line spacing away, on its own baseline, is a line)
+        full_b = [d for d in b["chars"] if id(d) not in {id(o) for o in other} and d["size"] >= PARAMS["superscript_em"] * ref]
+        if not full_b: return b
+        top_b, bot_b = min(d["v0"] for d in full_b), max(d["v1"] for d in full_b)
+        if min(c["v1"] for c in cs_) <= top_b or max(c["v0"] for c in cs_) >= bot_b: return b
+        if not all(any(max(d["u0"] - c["u1"], c["u0"] - d["u1"]) <= 0.5 * ref for d in full_b) for c in cs_): return b
+        ids = {id(d) for d in other}
+        for c in cs_: c["r5_line"] = True
+        return {"chars": [d for d in b["chars"] if id(d) not in ids]}
     merged = True
     while merged:
         merged = False
@@ -2912,7 +3035,7 @@ def lines_and_runs(chars, angle, objs, to_read, baseline_v):
             for j in (i - 1, i + 1):
                 if 0 <= j < len(lines):
                     nb = lines[j]
-                    if len(nb["chars"]) >= len(ln["chars"]) and abs(ln["vb"] - nb["vb"]) <= PARAMS["superscript_shift_em"] * max(ln["size"], nb["size"]) and not u_overlap(ln, nb):
+                    if len(nb["chars"]) >= len(ln["chars"]) and abs(ln["vb"] - nb["vb"]) <= PARAMS["superscript_shift_em"] * max(ln["size"], nb["size"]) and not u_overlap(ln, script_tier_free(ln, nb)):
                         cands.append((-abut(ln, nb), abs(ln["vb"] - nb["vb"]), j))
             if cands and min(cands)[0] < 0:
                 j = min(cands)[2]; nb = lines[j]
@@ -2941,8 +3064,11 @@ def lines_and_runs(chars, angle, objs, to_read, baseline_v):
         cs = sorted(ln["chars"], key=lambda c: c["u0"])
         # The existing two-font horizontal-overlap test decides membership; source painting order decides visibility.
         def overlap(c, d):
+            # lane r5-line: a script folded under or over the other tier (O21) shares no place with it when their
+            # boxes do not meet in height (one above the other is not overprinting)
+            if (c.get("r5_line") or d.get("r5_line")) and min(c["v1"], d["v1"]) <= max(c["v0"], d["v0"]): return False
             return c["font"] != d["font"] and min(c["u1"], d["u1"]) - max(c["u0"], d["u0"]) > PARAMS["overlap_share"] * min(c["u1"] - c["u0"], d["u1"] - d["u0"])
-        pairs = []
+        pairs = []; base_layers = None
         if any(overlap(c, d) for c, d in zip(cs, cs[1:])):
             for i, c in enumerate(cs):
                 for d in cs[i + 1:]:
@@ -2960,29 +3086,74 @@ def lines_and_runs(chars, angle, objs, to_read, baseline_v):
                         and min(c["size"], d["size"]) >= PARAMS["superscript_em"] * sz):
                     earlier["covered"] = True
             cs = [c for c in cs if not c.get("covered")]
-            byfont = collections.OrderedDict()
-            for c in cs: byfont.setdefault(c["font"], []).append(c)
-            layers = list(byfont.values())
+            # O20 (lane r5-line): the characters of a line are written in the order of their left edges, and a
+            # character in another typeface keeps its place between its neighbours. A ligature, an italic overhang,
+            # a sign or an accent in another font that overlaps a neighbour is one such character: one layer, in
+            # left-edge order (measured: AP05 p3 a ligature in its own font left the word, "Modi ed ... fi"; AP22
+            # p21 italic names and their roman commas set apart, "Pg Tf , and Td"). Only two texts drawn over
+            # one another are read as separate layers, one per font (as before): a font whose characters on the line,
+            # three or more and at least half of them, each overlap a character of another font (covered or not).
+            hit = set(); count = collections.Counter(c["font"] for c in ln["chars"])
+            for c, d in pairs: hit.update((id(c), id(d)))
+            overlaid = [f for f in count if count[f] >= 3 and sum(id(c) in hit for c in ln["chars"] if c["font"] == f) >= max(3, 0.5 * count[f])]
+            if overlaid or any(kept(c) for c in cs):
+                byfont = collections.OrderedDict()
+                for c in cs: byfont.setdefault(c["font"], []).append(c)
+                layers = list(byfont.values())
+            else:
+                layers = [cs]
+                for c in cs: c["r5_line"] = True
+                if not any(c.get("marker_glue") for c in cs):
+                    byfont = collections.OrderedDict()
+                    for c in cs: byfont.setdefault(c["font"], []).append(c)
+                    base_layers = list(byfont.values())
             # A repaired marker must stay between its neighbours even when an
             # unrelated font overhang elsewhere on this line was flagged.
             if any(c.get("marker_glue") for c in cs): layers = [cs]
         else:
             layers = [cs]
-        for cs in layers:
+        def split(cs):
             # the line's own word space: the median of its small gaps (between a tenth and three quarters of a letter height)
             small = [b["u0"] - a["u1"] for a, b in zip(cs, cs[1:]) if PARAMS["wordspace_min_em"] * ln["size"] <= b["u0"] - a["u1"] < PARAMS["wordspace_max_em"] * ln["size"]]
             wordspace = statistics.median(small) if small else None
-            cur = [cs[0]]
+            out = []; cur = [cs[0]]
             for prev, c in zip(cs, cs[1:]):
                 gap = c["u0"] - prev["u1"]
                 crosses = any(prev["u1"] < vr < c["u0"] and rv0 <= ln["vb"] <= rv1 + ln["size"] for vr, rv0, rv1 in vrules)
                 wide = wordspace is not None and gap > PARAMS["run_gap_wordspaces"] * wordspace
                 if gap > PARAMS["run_gap_em"] * ln["size"] or wide or crosses:
-                    runs.append((li, cur)); cur = [c]
+                    out.append(cur); cur = [c]
                 else:
                     cur.append(c)
-            runs.append((li, cur))
+            out.append(cur)
+            return out
+        if base_layers is not None:
+            # lane r5-line: the copy's note counts the runs that hold overprinted characters; where this line is now one
+            # layer, each run the per-font layers would have made with an overprinted character is recorded on its
+            # characters, so the copy can count those runs as before (the runs are fewer, the places the same)
+            for bcs in base_layers:
+                for r in split(bcs):
+                    if any(c.get("overprint") for c in r):
+                        tag = (li, id(r[0]))
+                        for c in r: c["op_base"] = tag
+            for c in ln["chars"]: c["op_line"] = True
+        for cs in layers:
+            if not any(kept(c) for c in cs):
+                before = [id(c) for c in cs]
+                cs = stacked_script_order(cs, ln["size"], barred)
+                if [id(c) for c in cs] != before:
+                    for c in cs: c["r5_line"] = True
+            for r in split(cs): runs.append((li, r))
     return lines, runs, overprint_lines
+
+def op_layers(ids, chars):
+    """lane r5-line: the character ids of each per-font run (with an overprinted character) inside these characters"""
+    groups = collections.OrderedDict()
+    for i in ids:
+        tag = chars[i].get("op_base")
+        if tag is not None: groups.setdefault(tag, []).append(i)
+    return list(groups.values())
+
 
 def regions_beside(a, b):
     """Different columns share less than one fifth of the narrower x extent."""
@@ -5544,6 +5715,80 @@ def join_figure_lettering(elements, blocks, tables, floats, unpaired):
                              "box_px":cb, "block":b["id"]})
 
 
+def caption_label_line_blocks(elements, blocks):
+    """Rule 4, caption extent on the label's line (lane r4-captionextent; round 5, lane captionside: figure captions,
+    the side caption of rule F13 among them): a caption is its label's line
+    plus the lines in the caption's own type. Rules 1-2 can set the caption text that follows the label
+    on the label's own line, after a wide gap (a tab), in a block of its own; that block then stands
+    between the caption and its picture and keeps them apart in pairing, and rule 6 reads it as body
+    text. Such a block joins the caption's block before pairing when, in the label's reading frame:
+      - the caption's block opens with the label (caption label first on its first line);
+      - every member of the block is a text run on the label's own line, to the right of the label;
+      - its runs are in the caption's type: the caption block's size (within a tenth), and, when the
+        caption block holds text of its own after the label, one of that text's faces;
+      - nothing lies between: no text run of another block on that line between the label and it;
+      - it is not a column's text: its left edge is not the left edge of a block of
+        column_min_lines or more lines (a body column whose first line is level with a side caption);
+      - it is not lettering: no drawn object (image, fill, outline, curve) that leaves the label outside
+        holds any of its runs or lies between the label and it.
+    The block is removed from the page's blocks and its runs become the caption block's members."""
+    by_id = {e["id"]: e for e in elements}
+    def size(e): return e.get("run_size_px", e["size_px"])
+    def texts(b): return [by_id[m] for m in b["members"] if m in by_id and by_id[m]["kind"] == "text"]
+    for b in list(blocks):
+        if b not in blocks or b.get("is_table"): continue
+        ts = texts(b)
+        if not ts: continue
+        first_line = min(e["line"] for e in ts)
+        line_runs = [e for e in ts if e["line"] == first_line]
+        to_read, _ = frame(line_runs[0]["angle"])
+        def rd(B):
+            u0, v0, u1, v1 = to_read(*B); return (min(u0, u1), min(v0, v1), max(u0, u1), max(v0, v1))
+        c = min(line_runs, key=lambda e: rd(e["box_px"])[0])
+        if not is_caption_run(c) or any(e["angle"] != c["angle"] for e in ts): continue
+        # round 5 (lane captionside, rule F13): figure captions only; a table caption's label line is left as before
+        if re.sub(r"\s+", "", c["text"]).lower().startswith("table"): continue
+        C = rd(c["box_px"]); em = size(c)
+        csize = statistics.median(size(e) for e in ts)
+        own_faces = {figure_caption_face(e) for e in ts if e is not c}
+        # Rule F13 (round 5): only a caption with no picture directly above or below it (a side caption) is read
+        # sideways; a drawn object across a third of the width of the caption with its label-line block, within three
+        # letter heights above or below it, is its picture, and its label line is left as before.
+        def ink0(D): return D[2] - D[0] > em and D[3] - D[1] > em
+        pictures0 = [D for D in (rd(d["box_px"]) for d in elements if d["kind"] in ("image", "fill", "outline", "curve")) if ink0(D)]
+        for o in list(blocks):
+            if o is b or o.get("is_table") or o.get("is_chart") or not o["members"]: continue
+            os_ = texts(o)
+            if len(os_) != len(o["members"]): continue
+            if not all(e["line"] == c["line"] and e["angle"] == c["angle"] for e in os_): continue
+            O = [rd(e["box_px"]) for e in os_]
+            B0 = [min([rd(b["box_px"])[0]] + [B[0] for B in O]), min([rd(b["box_px"])[1]] + [B[1] for B in O]),
+                  max([rd(b["box_px"])[2]] + [B[2] for B in O]), max([rd(b["box_px"])[3]] + [B[3] for B in O])]
+            if any(min(D[2], B0[2]) - max(D[0], B0[0]) > .3 * (B0[2] - B0[0]) and (0 <= B0[1] - D[3] <= 3 * em or 0 <= D[1] - B0[3] <= 3 * em)
+                   for D in pictures0): continue   # F13: the caption with its line has a picture directly above or below
+            x0 = min(B[0] for B in O)
+            if x0 < max(rd(e["box_px"])[2] for e in line_runs) - 1: continue
+            if any(abs(size(e) - csize) > .1 * csize for e in os_): continue
+            if own_faces and not all(figure_caption_face(e) in own_faces for e in os_): continue
+            gap = (C[2], x0)
+            def ink(D): return D[2] - D[0] > em and D[3] - D[1] > em
+            drawn = [rd(d["box_px"]) for d in elements if d["kind"] in ("image", "fill", "outline", "curve") and ink(rd(d["box_px"]))
+                     and not (rd(d["box_px"])[0] <= C[0] and C[2] <= rd(d["box_px"])[2] and rd(d["box_px"])[1] <= C[1] and C[3] <= rd(d["box_px"])[3])]
+            if any(min(D[2], B[2]) > max(D[0], B[0]) and min(D[3], B[3]) > max(D[1], B[1]) for D in drawn for B in O): continue
+            if any(D[0] < gap[1] and D[2] > gap[0] and min(D[3], C[3]) > max(D[1], C[1]) for D in drawn): continue
+            if any(t["kind"] == "text" and t["id"] not in o["members"] and t["id"] not in b["members"]
+                   and min(rd(t["box_px"])[3], C[3]) > max(rd(t["box_px"])[1], C[1])
+                   and rd(t["box_px"])[0] < gap[1] and rd(t["box_px"])[2] > gap[0] for t in elements): continue
+            if any(k is not o and k is not b and not k.get("is_table") and k.get("text_lines", 0) >= PARAMS["column_min_lines"]
+                   and texts(k) and abs(min(rd(e["box_px"])[0] for e in texts(k)) - x0) <= em for k in blocks): continue
+            b["members"] = b["members"] + o["members"]
+            es = [by_id[m] for m in b["members"] if m in by_id]
+            b["box_px"] = [min(e["box_px"][0] for e in es), min(e["box_px"][1] for e in es), max(e["box_px"][2] for e in es), max(e["box_px"][3] for e in es)]
+            b["kinds"] = sorted({e["kind"] for e in es})
+            b.setdefault("label_line_joined", []).append(o["id"])
+            if "text" in b: b["text"] = " ".join(e["text"] for e in sorted(texts(b), key=lambda e: (e["line"], rd(e["box_px"])[0])))[:80]
+            blocks.remove(o)
+
 def floats_with_captions(elements, blocks, tables=(), chars=None):
     """Rule 4: floats = larger boxes holding a graphic and a caption label, or a caption-label
     box stacked against a graphic box. Each caption and each graphic is paired once, the nearest
@@ -5579,6 +5824,7 @@ def floats_with_captions(elements, blocks, tables=(), chars=None):
     tables = [t for t in tables if t not in demoted]
     for t in demoted: t["demoted"] = "holds a Figure label and no Table label: a figure's lettering, not a table"
     split_figure_caption_blocks(elements, blocks, tables)
+    caption_label_line_blocks(elements, blocks)
     blocks = list(blocks) + [{"id": t["id"], "box_px": t["box_px"], "members": [], "text_lines": 0, "kinds": ["table"], "is_table": True} for t in tables]
     # blocks swallowed by a table are not separate blocks for rule 4
     def inside(b, t): B, T = b["box_px"], t["box_px"]; return B[0] >= T[0] - 1 and B[2] <= T[2] + 1 and B[1] >= T[1] - 1 and B[3] <= T[3] + 1
@@ -5998,13 +6244,124 @@ def journal_art(elements, blocks, floats, tables, angle):
 
 ORDER = os.environ.get("BOXER_ORDER", "12345")
 
+def r5_line_failures(new, base):
+    """Lane r5-line output check: for each line the lane's changes touched, compared with the page built without
+    them (the earlier behaviour): (1) the line holds one earlier line, plus only whole earlier lines of at most eight
+    small characters (scripts, under superscript_em of that line's size); no full-size character of the earlier
+    line went to another line; (2) its characters are in no more blocks than before, and in the block of the earlier
+    line's neighbours above and below in its block; (3) a word space stands between two adjacent characters only
+    where the earlier build had one between them, and none was taken away. Returns the boxes of the failing lines."""
+    info = new["_r5_char_info"]
+    def maps(res):
+        line, elem, block, order, spaced = {}, {}, {}, {}, set()
+        bl = {}
+        for b in res.get("blocks", []):
+            for m in b.get("members", []): bl[m] = b["id"]
+        for e in res["elements"]:
+            if e.get("kind") != "text" or "char_ids" not in e: continue
+            for k, i in enumerate(e["char_ids"]):
+                line[i] = e["line"]; elem[i] = e["id"]; block[i] = bl.get(e["id"]); order[i] = (e["id"], k)
+            spaced.update(e.get("_spaced", []))
+        return line, elem, block, order, spaced
+    nl, ne, nb, no, ns = maps(new); bl_, be, bb, bo, bs = maps(base)
+    nlines, blines = collections.defaultdict(list), collections.defaultdict(list)
+    for i, l in nl.items(): nlines[l].append(i)
+    for i, l in bl_.items(): blines[l].append(i)
+    belem = collections.defaultdict(list)
+    for i, (e, k) in bo.items(): belem[e].append((k, i))
+    nelem = collections.defaultdict(list)
+    for i, (e, k) in no.items(): nelem[e].append((k, i))
+    touched = {nl[i] for i in new.get("_r5_line_ids", []) if i in nl}
+    # and every line whose characters are not exactly one earlier line's, whatever changed it (memo line-holdback-2)
+    bsets = {frozenset(v) for v in blines.values()}
+    touched |= {l for l, v in nlines.items() if frozenset(v) not in bsets}
+    fails = []
+    for l in touched:
+        C = set(nlines[l]); bad = False
+        counts = collections.Counter(bl_[i] for i in C if i in bl_)
+        if not counts: continue
+        home = counts.most_common(1)[0][0]
+        hsizes = sorted(info[i][0] for i in blines[home])
+        hsize = hsizes[len(hsizes) // 2]
+        for h in counts:
+            if h == home: continue
+            hs = blines[h]
+            if not (set(hs) <= C and len(hs) <= 8 and all(info[i][0] < PARAMS["superscript_em"] * hsize for i in hs)): bad = True
+            else:
+                # (memo line-holdback-2) the earlier line joins only if it overlaps the height of the line it joins and
+                # each of its characters stands within half a letter of a character of that line, beside or over it
+                own = [i for i in blines[home] if i in C]
+                if own:
+                    top, bot = min(info[i][1][1] for i in own), max(info[i][1][3] for i in own)
+                    if min(info[i][1][3] for i in hs) <= top or max(info[i][1][1] for i in hs) >= bot: bad = True
+                    if not all(any(max(info[j][1][0] - info[i][1][2], info[i][1][0] - info[j][1][2]) <= 0.5 * hsize for j in own) for i in hs): bad = True
+        if any(i not in C and info[i][0] >= PARAMS["superscript_em"] * hsize for i in blines[home]): bad = True
+        if not bad:
+            nbs = {nb.get(i) for i in C}; bbs = {bb.get(i) for i in C}
+            if len(nbs) > len(bbs): bad = True
+            else:
+                # per earlier block on the line (a row may cross two columns): its characters and their block-mates on the
+                # earlier lines above and below share one block in this build too
+                for hb in {bb.get(i) for i in blines[home]} - {None}:
+                    own = [i for i in blines[home] if bb.get(i) == hb]
+                    main = collections.Counter(nb.get(i) for i in own).most_common(1)[0][0]
+                    for other in (home - 1, home + 1):
+                        mates = [i for i in blines.get(other, []) if bb.get(i) == hb and i not in C]
+                        if mates and collections.Counter(nb.get(i) for i in mates).most_common(1)[0][0] != main: bad = True
+        if not bad:
+            for e in {ne[i] for i in C}:
+                seq = [i for k, i in sorted(nelem[e])]
+                for a_, b_ in zip(seq, seq[1:]):
+                    same = be.get(a_) is not None and be.get(a_) == be.get(b_) and bo[b_][1] == bo[a_][1] + 1
+                    if b_ in ns and same and b_ not in bs: bad = True     # a space where the earlier build had none
+                    if b_ not in ns and same and b_ in bs: bad = True     # a space taken away
+                # a space inside a word: the earlier neighbour of b_ is still left of it in this element, with no space then
+                for k, b_ in enumerate(seq):
+                    if b_ not in ns or b_ not in bo or bo[b_][1] == 0: continue
+                    pb = sorted(belem[bo[b_][0]])[bo[b_][1] - 1][1]
+                    if pb in seq[:k] and b_ not in bs: bad = True
+        if bad: fails.extend(info[i][1] for i in C)
+    return fails
+
+
+R5_BASE = {}   # lane r5-line: page -> the page built without the lane's changes, where the lane touched it
+
+
+def _r5_clean(res):
+    for k in ("_r5_line_boxes", "_r5_line_ids", "_r5_char_info"): res.pop(k, None)
+    for e in res.get("elements", []): e.pop("_spaced", None)
+    return res
+
+
+def _box_elements_scoped(pdf_path, part, label, drop_boxes=()):
+    """Lane r5-line: the page is built once. If no line was touched by the lane's O20/O21 changes, that build stands.
+    Otherwise the page is also built without them (the earlier behaviour, the whole page a keep zone); lines that fail
+    the output check (r5_line_failures) and lines inside a table or a float become keep zones, and the page is built
+    again with those zones, where the earlier behaviour holds."""
+    R5_BASE.pop(part["page"], None)
+    result = _box_elements(pdf_path, part, label, drop_boxes=drop_boxes)
+    if "error" in result or not result.get("_r5_line_ids"): return _r5_clean(result)
+    touched = result.get("_r5_line_boxes", [])
+    zones = [t["box_px"] for t in result.get("tables", []) if t.get("box_px")] + [f["box_px"] for f in result.get("floats", []) if f.get("box_px")]
+    def inside(b):
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        return any(z[0] <= cx <= z[2] and z[1] <= cy <= z[3] for z in zones)
+    zones = zones if any(inside(b) for b in touched) else []
+    base = _box_elements(pdf_path, part, label, drop_boxes=drop_boxes, keep_zones=[[-1e9, -1e9, 1e9, 1e9]])
+    R5_BASE[part["page"]] = _r5_clean(dict(base, elements=[dict(e) for e in base.get("elements", [])]))   # for the first-page check
+    fails = r5_line_failures(result, base) if "error" not in base else []
+    if not zones and not fails: return _r5_clean(result)
+    again = _box_elements(pdf_path, part, label, drop_boxes=drop_boxes, keep_zones=zones + [[b[0] - 0.5, b[1] - 0.5, b[2] + 0.5, b[3] + 0.5] for b in fails])
+    return _r5_clean(again)
+
+
 def box_elements(pdf_path, part, label, out_prefix=None, second_pass=False):
-    result = _box_elements(pdf_path, part, label)
+    result = _box_elements_scoped(pdf_path, part, label)
     if ORDER == "15234" and not second_pass and "error" not in result:
         # rule 5 straight after rule 1: art from the elements alone, no floats, tables or blocks known
         art = journal_art(result["elements"], [], [], [], result["reading_angle"])
         if not art: result["pass"] = 1; result["art"] = []; return result
-        second = _box_elements(pdf_path, part, label, drop_boxes=[a["box_px"] for a in art])
+        second = _box_elements_scoped(pdf_path, part, label, drop_boxes=[a["box_px"] for a in art])
         second["pass"] = 2; second["art"] = art; second["order"] = ORDER
         second["first_pass"] = {"elements": len(result["elements"]), "blocks": len(result["blocks"]), "tables": len(result["tables"]), "floats": len(result["floats"])}
         second["first_pass_result"] = result
@@ -6014,7 +6371,7 @@ def box_elements(pdf_path, part, label, out_prefix=None, second_pass=False):
     # rule 5, second half: remove the art from the page and run rules 1 to 4 again on what remains,
     # so an element the art had split is boxed whole
     art = result["art"]
-    second = _box_elements(pdf_path, part, label, drop_boxes=[a["box_px"] for a in art])
+    second = _box_elements_scoped(pdf_path, part, label, drop_boxes=[a["box_px"] for a in art])
     second["pass"] = 2; second["art"] = art
     second["first_pass"] = {"elements": len(result["elements"]), "blocks": len(result["blocks"]), "tables": len(result["tables"]), "floats": len(result["floats"])}
     second["first_pass_result"] = result
@@ -6380,7 +6737,7 @@ def overlay_ink(o, palette):
     return c is not None and c not in palette
 
 
-def _box_elements(pdf_path, part, label, drop_boxes=()):
+def _box_elements(pdf_path, part, label, drop_boxes=(), keep_zones=()):
     def dropped(box, exact=False):   # a drawn object the first pass found to be art, or a piece of one (an outlined letter)
         if exact: return any(all(abs(box[k] - d[k]) <= 1 for k in range(4)) for d in drop_boxes)
         return any(box[0] >= d[0] - 1 and box[1] >= d[1] - 1 and box[2] <= d[2] + 1 and box[3] <= d[3] + 1 for d in drop_boxes)
@@ -6390,7 +6747,7 @@ def _box_elements(pdf_path, part, label, drop_boxes=()):
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[page_no - 1]
         dy = plumber_shift_px(pdf_path, page_no, page)
-        chars, objs = [], []
+        chars, objs = [], []; all_rules = []
         palette = layout_palette(page)
         for c in pdfium_characters(pdf_path, page_no):
             cx, cy = (c["x0"] + c["x1"]) / 2, (c["y0"] + c["y1"]) / 2
@@ -6405,6 +6762,7 @@ def _box_elements(pdf_path, part, label, drop_boxes=()):
                     else: x0, x1 = x0 - lw / 2, x1 + lw / 2
                 if x1 < bx[0] or x0 > bx[2] or y1 < bx[1] or y0 > bx[3]: continue
                 thin = min(x1 - x0, y1 - y0) <= px(PARAMS["rule_max_pt"])
+                if thin: all_rules.append({"kind": "rule", "box_px": [x0, y0, x1, y1]})
                 if dropped([x0, y0, x1, y1]): continue
                 objs.append({"kind": "rule" if thin else "fill", "source": kind,
                              "box_px": [x0, y0, x1, y1], "linewidth_pt": o.get("linewidth"),
@@ -6447,7 +6805,7 @@ def _box_elements(pdf_path, part, label, drop_boxes=()):
     lines, runs, overprint_lines, line_angle = [], [], set(), []
     for ang, gchars in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         to_read, baseline_v = frame(ang)
-        gl, gr, go = lines_and_runs(gchars, ang, objs, to_read, baseline_v)
+        gl, gr, go = lines_and_runs(gchars, ang, objs, to_read, baseline_v, keep_zones, bars=all_rules)
         off = len(lines); line_angle.extend([ang] * len(gl))
         lines.extend(gl); runs.extend((li + off, cs) for li, cs in gr); overprint_lines.update(li + off for li in go)
     def hull(cs):
@@ -6482,8 +6840,40 @@ def _box_elements(pdf_path, part, label, drop_boxes=()):
                 # space across the marker, without putting one before punctuation.
                 marker_space = marker_space or prev.get("space_after", False)
                 txt += c["text"]; continue
-            if unicodedata.category(prev["text"][:1] or " ") == "Sk" or unicodedata.category(c["text"][:1] or " ") == "Sk":   # a free-standing accent belongs to its letter
+            # O20 (lane r5-line): a mark drawn over a letter of another font (now kept in its place on the line) belongs
+            # to that letter: no word space before it, and the space after it is judged from that letter's edge
+            # (measured: AS14 p11 a caron read as a digit over c, "Krc9 mova" with a space; AQ23 p1 a circumflex,
+            # "Hoˆ te"). A mark: a character flagged as overprinting whose box overlaps an adjacent letter of another
+            # font by more than half its own width; the circumflex and caron (modifier letters, not Sk) as well.
+            def host(x, i):
+                # a letter or digit as a mark only when its box is much shorter than the letter's (an accent's ink)
+                short = not x["text"].isalnum() or x["text"] in ("\u02c6", "\u02c7")
+                for j in (i - 1, i + 1):
+                    if 0 <= j < len(cs) and cs[j]["text"].isalpha() and cs[j].get("font") != x.get("font"):
+                        y = cs[j]
+                        if not short and (x["v1"] - x["v0"]) >= 0.6 * (y["v1"] - y["v0"]): continue
+                        if min(x["u1"], y["u1"]) - max(x["u0"], y["u0"]) > 0.5 * (x["u1"] - x["u0"]): return y
+                return None
+            k = len(starts) - 1   # the index of c in cs (starts gains one entry per character)
+            # (ASCII punctuation is never a mark: a bracket or comma set under an italic letter keeps the usual spacing)
+            def markish(x): return (x.get("overprint") or x["text"] in ("\u02c6", "\u02c7")) and not (len(x["text"]) == 1 and x["text"] in string.punctuation)
+            pmark = host(prev, k - 1) if markish(prev) else None
+            cmark = host(c, k) if markish(c) else None
+            if cmark is not None and cmark is prev:
                 txt += c["text"]; continue
+            before_host = cmark is not None and k + 1 < len(cs) and cmark is cs[k + 1]
+            if before_host:
+                # a mark set just left of the letter it overprints: the word space before it is the one before that letter
+                c = dict(c, orig_u=cmark["orig_u"], u0=cmark["u0"])
+            elif (unicodedata.category(prev["text"][:1] or " ") == "Sk" or unicodedata.category(c["text"][:1] or " ") == "Sk") and not (
+                    c.get("r5_line") and unicodedata.category(c["text"][:1] or " ") == "Sk" and prev.get("space_after")) and not (
+                    prev.get("r5_line") and unicodedata.category(prev["text"][:1] or " ") == "Sk" and min(prev["u1"], c["u1"]) <= max(prev["u0"], c["u0"])):   # a free-standing accent belongs to its letter
+                # (lane r5-line: an accent now kept on its line after a word that ends in a PDF space glyph keeps that
+                # space; one that stands over no letter after it, its letter not drawn, is not joined to the next word)
+                txt += c["text"]; continue
+            if pmark is not None and pmark is not c:
+                gap = c["u0"] - max(pmark["u1"], prev["u1"])
+                txt += (" " if gap > PARAMS["text_space_em"] * c["size"] else "") + c["text"]; continue
             if prev.get("font") in spaced_fonts:
                 sp = prev.get("space_after") or ink_gap > PARAMS["wordspace_max_em"] * prev["size"]
                 # a space glyph the reading layer lost (set in a text object of its own): the advance gap, above
@@ -6495,10 +6885,12 @@ def _box_elements(pdf_path, part, label, drop_boxes=()):
             sp = sp or (marker_space and c["text"][:1].isalnum())
             marker_space = False
             txt += (" " if sp else "") + c["text"]
-        elements.append({"id": f"run:{ri+1}", "kind": "text", "line": li + 1, "angle": line_angle[li], "box_px": hull(cs),
+        spaced = [cs[i]["id"] for i in range(1, len(cs)) if txt[starts[i]:starts[i] + 1] == " "]
+        elements.append({"_spaced": spaced, "id": f"run:{ri+1}", "kind": "text", "line": li + 1, "angle": line_angle[li], "box_px": hull(cs),
                          "text": txt, "char_ids": [c["id"] for c in cs], "size_px": lines[li]["size"], "run_size_px": statistics.median(c["size"] for c in cs),
                          "flags": (["overprinted text: two fonts share one place; last painted layer retained"] if any(c.get("overprint") for c in cs) else [])})
         if any(c.get("line_end_hyphen") for c in cs): elements[-1]["line_end_hyphen"] = True
+        if any(c.get("op_line") for c in cs): elements[-1]["overprint_layers"] = op_layers([c["id"] for c in cs], chars)
         # lane r3-headband: fake small capitals (a capital letter set larger than the capitals after it, the run's
         # letters all capitals, a section number before it allowed) record the first letter's size; rule 6
         # measures a heading line at that size
@@ -6631,6 +7023,7 @@ def _box_elements(pdf_path, part, label, drop_boxes=()):
             frag = dict(e, **part_); frag.pop("ink_parts", None)
             if not any(chars[i].get("line_end_hyphen") for i in frag["char_ids"]): frag.pop("line_end_hyphen", None)
             if n: frag.pop("label_font", None)
+            if "overprint_layers" in frag: frag["overprint_layers"] = op_layers(frag["char_ids"], chars)
             frag["region_parts"] = [part_]
             frag["region_source"] = e["id"]
             split_elements.append(frag)
@@ -6675,6 +7068,9 @@ def _box_elements(pdf_path, part, label, drop_boxes=()):
             "floats": (floats := assemble_tables(elements, blocks, tables, floats_with_captions(elements, blocks, tables, chars), floats_with_captions.unpaired)), "unpaired": assemble_tables.unpaired, "tables": [t for t in tables if not t.get("demoted")],
             "art": journal_art(elements, blocks, floats, [t for t in tables if not t.get("demoted")], angle),
             "caption_boxes_px": cboxes, "flags": flags + ([f"{len(overprint_lines)} line(s) with overprinted text"] if overprint_lines else []) + (["unmapped glyphs retained as U+FFFD"] if control_unmapped else []), "elements": elements}
+    result["_r5_line_boxes"] = [[c["x0"], c["y0"], c["x1"], c["y1"]] for c in chars if c.get("r5_line")]
+    result["_r5_line_ids"] = [c["id"] for c in chars if c.get("r5_line")]
+    result["_r5_char_info"] = {c["id"]: (c["size"], [c["x0"], c["y0"], c["x1"], c["y1"]]) for c in chars}
     for i, (cs, why) in enumerate(early_furniture):
         e = dict(id=f'proof-furniture:{i+1}', kind='text', line=len(lines)+i+1,
                  angle=cs[0]['angle'], box_px=hull(cs), text=''.join(c['text'] for c in cs),
@@ -7199,6 +7595,62 @@ def split_runin_abstract(page, body):
         return
 
 
+ABSTRACT_LABEL_ROW = re.compile(r'^\s*(?:abstract|summary)\s*[:.\-–—]?\s*$', re.I)
+ABSTRACT_RUNIN_ROW = re.compile(r'^\s*(?i:abstract|summary)\s*[:.\-–—]\s*\S|^\s*(?:ABSTRACT|SUMMARY)\s+(?!OF\b)\S')
+
+
+def split_labelled_abstract(page, body):
+    """Rule 6 (lane r6-abstract, rules B1, B3, B10): the abstract starts at its label.
+
+    On the front page, a block whose rows above hold other front text (the title, the
+    names, the affiliations) and which goes on with a row that opens with the label
+    "Abstract" or "Summary" (any case; alone on its printed line, or run in with a
+    colon, a stop or a dash, or in capitals before the text) is cut at that row: the
+    label row and every row below it in the block are the abstract, a block of their
+    own; the rows above stay the front block. The label must stand alone on its printed
+    line (no run of another block shares the line) and, when it is alone, have a row
+    under it. Nothing is decided by size or face (B7). The structured summary set with
+    the byline is split_runin_abstract's (it runs first; its parts are not cut again).
+    The original block is retained for an idempotent --paper rerun.
+    """
+    runs = {e['id']: e for e in page['runs'] if e['angle'] == 0}
+    result, changed = [], False
+    for b in page['blocks']:
+        if b.get('runin_abstract') is not None or b.get('labelled_abstract') is not None:
+            result.append(b); continue
+        members = set(b['members'])
+        rows = collections.OrderedDict()
+        for e in sorted((runs[m] for m in b['members'] if m in runs and runs[m]['text'].strip()),
+                        key=lambda e: (e['box_px'][1], e['box_px'][0])):
+            ln = page['run_line'].get(e['id'])
+            rows.setdefault(id(ln) if ln is not None else e['id'], []).append(e)
+        rows = list(rows.values())
+        cut = None
+        for i, row in enumerate(rows):
+            if i == 0: continue
+            ln = page['run_line'].get(row[0]['id'])
+            if ln is None or any(x['id'] not in members for x in ln['runs'] if x['text'].strip()): continue
+            text = ' '.join(e['text'].strip() for e in sorted(row, key=lambda e: e['box_px'][0]))
+            if ABSTRACT_LABEL_ROW.match(text) and i + 1 < len(rows) or ABSTRACT_RUNIN_ROW.match(text):
+                cut = i; break
+        if cut is None:
+            result.append(b); continue
+        ids = {e['id'] for r in rows[cut:] for e in r}
+        for suffix, ms in [('front', [m for m in b['members'] if m not in ids]),
+                           ('abstract', [m for m in b['members'] if m in ids])]:
+            if not ms: continue
+            es = [runs[m] for m in ms if m in runs]
+            if not es: continue
+            bs = [e['box_px'] for e in es]
+            part = dict(b, id=b['id'] + ':' + suffix, members=ms, main_text_source=b['id'],
+                        box_px=[min(x[0] for x in bs), min(x[1] for x in bs), max(x[2] for x in bs), max(x[3] for x in bs)],
+                        text_lines=len({e['line'] for e in es}), text=' '.join(e['text'] for e in es)[:80],
+                        labelled_abstract=suffix == 'abstract')
+            result.append(part); page['d']['blocks'].append(part.copy())
+        changed = True
+    if changed: page['blocks'] = result
+
+
 def reading_order_abstract_flow(ordered, blocks, previous, rows_of, text_of, allow_open=True):
     """Keep an unfinished abstract and its keywords ahead of next-page body columns.
 
@@ -7274,6 +7726,7 @@ def structured_abstract_blocks(blocks, body, text_of):
     """
     for b in blocks:
         if b.get('runin_abstract'): b.update(cls='main', abstract=True, why='run-in structured abstract separated from front matter')
+        if b.get('labelled_abstract'): b.update(cls='main', abstract=True, why='labelled abstract separated from the front block (B1)')
     if any(b.get('runin_abstract') for b in blocks):
         for h in blocks:
             head, *rest = text_of(h).strip().split("\n")
@@ -8199,6 +8652,135 @@ def pull_quote_groups(runs, drawn, body_face):
         if any(around(e) for e in beside) and ids not in found: found.append(ids)
     return found
 
+# lane r5-wrap: text on both sides of a picture (rules O32, O33, O34 of the round-5 rules)
+WRAP_OPTIONS = ("across: read each row's left piece, then its right piece", "down: read the left side down, then the right side")
+
+
+def wrap_vocabulary(pages_runs):
+    """the paper's words (three or more letters, lower case) with their counts: a hyphen join that makes one of them is
+    a witness that the two pieces belong together (O33)"""
+    v = collections.Counter()
+    for runs in pages_runs:
+        for e in runs:
+            for w in re.findall(r"[^\W\d_]{3,}", e.get("text", "").lower()): v[w] += 1
+    return v
+
+
+def wrap_continues(a, b, vocab):
+    """O33 evidence that piece text b continues piece text a: 2 or 1 for, -1 against, 0 none.  A hyphen end followed by
+    a small letter is for (twice when the joined word is a word of the paper), by a capital against; an open sentence
+    followed by a capital is against; a closed sentence followed by a capital is for, by a small letter against."""
+    a, b = a.strip(), b.strip()
+    if not a or not b: return 0
+    m = re.match(r"[\"'(\[“‘]?([^\W\d_]+)", b)
+    first = m.group(1) if m else ""
+    lower, upper = first[:1].islower(), first[:1].isupper()
+    frag = re.search(r"([^\W\d_]+)[-­]$", a)
+    if frag:
+        if upper: return -1
+        if lower: return 2 if vocab.get((frag.group(1) + first).lower(), 0) else 1
+        return 0
+    t = re.sub(r"(?:[\s,–\-]*(?:\[[\d,\s–\-]+\]|\(\d[\d,\s–\-]*\)|\d{1,3}(?:[,–\-]\d{1,3})*))+$", "", a) \
+        if re.search(r"[.!?:]", a[-12:]) else a
+    closed = t.rstrip("\"')]”’*†‡§ ").endswith((".", "?", "!", ":"))
+    if not closed: return -1 if upper else 0
+    return 1 if upper else (-1 if lower else 0)
+
+
+def wrap_direction(rows, left, vocab):
+    """O33: for each left piece with a left piece below it on the next row of the wrap: does it continue in that piece
+    (down) or in the right piece of its own row (across)?  Most deciding rows, two or more, settle the order; otherwise
+    it is unclear (O34).  rows: [(left text, right text, top)], left: [(text, top)] of every left piece, top to bottom."""
+    vd = va = 0
+    tops = [r[2] for r in rows]
+    for lt, rt, top in rows:
+        below = next((t for t, y in left if y > top), None)
+        nxt = next((y for t, y in left if y > top), None)
+        if below is None or nxt not in tops: continue
+        d, a = wrap_continues(lt, below, vocab), wrap_continues(lt, rt, vocab)
+        if d > a: vd += 1
+        elif a > d: va += 1
+    n = vd + va
+    if n >= 2 and vd > n / 2: return "down", vd, va
+    if n >= 2 and va > n / 2: return "across", vd, va
+    return "unclear", vd, va
+
+
+def wrap_places(runs, pictures, body, tol, block_of=None, gutters=()):
+    """O32: a picture with body text on its left and on its right at the same heights (two or more rows), inside one
+    band.  runs: the page's upright main-text runs; pictures: boxes of drawn objects and floats.  Rows beside the
+    picture overlap its height by half a row, or its runaround margin (one letter height above and below).  A row's left piece is
+    its runs left of the picture nearest to it (a gap over 2.5 letter heights, or a run of another block, parts it from
+    another column's text),
+    ending within three letter heights of the picture or starting on the left edge of the pieces that do (a paragraph's
+    last line); its right piece the runs right of the picture, starting within three letter heights of it.  A piece
+    with a column gutter of the page (gutters: (left, right) x of each) between it and the picture is the next
+    column's text, not beside the picture; a drawn object lying within a gutter is a column rule, not a picture."""
+    def size(e): return e.get("run_size_px", e["size_px"])
+    body_runs = [e for e in runs if e["angle"] == 0 and e.get("text", "").strip() and abs(size(e) - body) <= 2 * tol * body]
+    rows = []
+    for e in sorted(body_runs, key=lambda e: (e["box_px"][1] + e["box_px"][3]) / 2):
+        cy = (e["box_px"][1] + e["box_px"][3]) / 2; h = max(4.0, e["box_px"][3] - e["box_px"][1])
+        if rows and abs(cy - rows[-1]["cy"]) <= 0.45 * max(h, rows[-1]["h"]): rows[-1]["runs"].append(e)
+        else: rows.append({"cy": cy, "h": h, "runs": [e]})
+    out = []
+    mids = [(lo + hi) / 2 for lo, hi in gutters]
+    for B in pictures:
+        x0, y0, x1, y1 = B
+        if any(lo - body <= x0 and x1 <= hi + body for lo, hi in gutters): continue
+        pieces = []
+        for r in rows:
+            top = min(e["box_px"][1] for e in r["runs"]); bot = max(e["box_px"][3] for e in r["runs"])
+            core = min(bot, y1) - max(top, y0) > 0.5 * (bot - top)
+            # a row within a letter height above or below the picture (its runaround margin) may be split too
+            if not core and min(bot, y1 + body) - max(top, y0 - body) <= 0.5 * (bot - top): continue
+            rs = sorted(r["runs"], key=lambda e: e["box_px"][0])
+            if any(e["box_px"][0] < x0 and e["box_px"][2] > x1 for e in rs):
+                if core: pieces = None; break   # a line runs through the picture: no wrap
+                continue
+            lw = [e for e in rs if (e["box_px"][0] + e["box_px"][2]) / 2 < x0]
+            rw = [e for e in rs if (e["box_px"][0] + e["box_px"][2]) / 2 > x1]
+            bo = block_of or {}
+            for k in range(len(lw) - 1, 0, -1):
+                if lw[k]["box_px"][0] - lw[k - 1]["box_px"][2] > 2.5 * body or bo.get(lw[k]["id"]) != bo.get(lw[k - 1]["id"]): lw = lw[k:]; break
+            for k in range(1, len(rw)):
+                if rw[k]["box_px"][0] - rw[k - 1]["box_px"][2] > 2.5 * body or bo.get(rw[k]["id"]) != bo.get(rw[k - 1]["id"]): rw = rw[:k]; break
+            if lw and any(lw[-1]["box_px"][2] < g < x0 for g in mids): lw = []
+            if rw and any(x1 < g < rw[0]["box_px"][0] for g in mids): rw = []
+            pieces.append((r, lw, rw if rw and rw[0]["box_px"][0] - x1 <= 3 * body else []))
+        if not pieces: continue
+        near = [lw for _, lw, _ in pieces if lw and x0 - lw[-1]["box_px"][2] <= 3 * body]
+        if not near: continue
+        edge = sorted(lw[0]["box_px"][0] for lw in near)[len(near) // 2]
+        pieces = [(r, lw if lw and (x0 - lw[-1]["box_px"][2] <= 3 * body or abs(lw[0]["box_px"][0] - edge) <= body) else [], rw)
+                  for r, lw, rw in pieces]
+        both = [(lw, rw) for _, lw, rw in pieces if lw and rw]
+        if len(both) < 2: continue
+        out.append({"box_px": [round(v, 1) for v in B], "rows": both, "left": [lw for _, lw, _ in pieces if lw],
+                    "right": [rw for _, _, rw in pieces if rw]})
+    return out
+
+
+def wrap_pictures(elements, art, floats, frame_w, body):
+    """the page's pictures for O32: drawn objects (image, fill, outline, rule; rule 5's journal art too) joined where
+    they touch, and floats; a picture is at least two letter heights wide and tall and narrower than nine tenths of the
+    text frame; a picture inside another is part of it"""
+    boxes = [list(e["box_px"]) for e in list(elements) + list(art) if e.get("kind") in ("image", "fill", "outline", "rule")]
+    merged = []
+    for b in sorted(boxes, key=lambda b: (b[1], b[0])):
+        grown = True
+        while grown:
+            grown = False
+            for o in merged:
+                if o[0] - 2 <= b[2] and b[0] <= o[2] + 2 and o[1] - 2 <= b[3] and b[1] <= o[3] + 2:
+                    b = [min(b[0], o[0]), min(b[1], o[1]), max(b[2], o[2]), max(b[3], o[3])]; merged.remove(o); grown = True; break
+        merged.append(b)
+    merged += [list(f["box_px"]) for f in floats]
+    pics = [b for b in merged if b[2] - b[0] >= 2 * body and b[3] - b[1] >= 2 * body and b[2] - b[0] < 0.9 * frame_w]
+    def inside(a, b): return a is not b and b[0] - 2 <= a[0] and b[1] - 2 <= a[1] and a[2] <= b[2] + 2 and a[3] <= b[3] + 2
+    return [a for i, a in enumerate(pics) if not any(inside(a, b) and (a != b or j < i) for j, b in enumerate(pics))]
+
+
 def main_text(paper_dir, draw=True):
     """Rule 6 (main text): on the float-free, art-free copy of every page, the main text of the
     paper is separated from everything else. The body size is the character-weighted median size
@@ -8441,6 +9023,7 @@ def main_text(paper_dir, draw=True):
         write_json(os.path.join(paper_dir, "main-text.json"), summary, indent=1)
         return summary
     body = statistics.median(sizes)
+    wrap_vocab = wrap_vocabulary([p["runs"] for p in P])   # lane r5-wrap (O33)
     # Table headers can lie just outside rule 3's member set. Their connection
     # to actual cells is stronger evidence than recurrence at a page top.
     for p in P:
@@ -8656,6 +9239,36 @@ def main_text(paper_dir, draw=True):
         return angle, re.sub(r"#+", "#", text), position
     known_headers = {header_family(ln) for p in P for ln in p["lines"]
                      if band_witness(ln, p) and ln["box"][3] < EDGE_SHARE * p["H"]}
+    # Lane r6-artinfo, rule I8 (page-1 notes are content; prior art lane r4-frontblock): on the
+    # front page the footer band's position alone does not make a line furniture. It is furniture
+    # when its letters (digits, spaces and signs ignored) stand in the footer band of another page
+    # (a running footer shifted on the front page), or when it has no letters (a folio). A
+    # front-page-only note set in that band (a supplementary-material note, the second row of a
+    # how-to-cite note) is page content. A line rule 1 joined on one baseline is decided run by
+    # run: its recurring runs (a footer, a folio) stay furniture as a line of their own, its other
+    # runs stay page text.
+    def band_letters(text):
+        return "".join(ch for ch in unicodedata.normalize("NFKC", text) if ch.isalpha()).lower()
+    other_band = ["".join(band_letters(ln["text"]) for ln in sorted(q["lines"], key=lambda ln: (ln["box"][1], ln["box"][0]))
+                          if footer_top is not None and ln["angle"] == 0
+                          and ln["box"][1] >= footer_top - PARAMS["band_tolerance_em"] * ln["size"])
+                  for q in P if q is not front]
+    def band_recurs(text):
+        letters = band_letters(text)
+        return not letters or any(letters in band for band in other_band)
+    def front_band_furniture(p, ln):
+        if band_recurs(ln["text"]): return True
+        rec = [e for e in ln["runs"] if band_recurs(e["text"])]
+        if not rec: return False
+        kept = [e for e in ln["runs"] if e not in rec]
+        if not kept: return True   # every run recurs on its own: the line is furniture as a whole
+        ln.update(runs=kept, box=hull([e["box_px"] for e in kept]), text="".join(e["text"] for e in kept), size=max(rsize(e) for e in kept))
+        separate = {"angle": ln["angle"], "box": hull([e["box_px"] for e in rec]), "text": "".join(e["text"] for e in rec),
+                    "runs": rec, "size": max(rsize(e) for e in rec), "cls": None}
+        furniture(separate, "inside the recurring footer band")
+        p["lines"].append(separate)
+        for e in rec: p["run_line"][e["id"]] = separate
+        return False
     for p in P:
         column_tops = []
         upright = [ln for ln in p["lines"] if ln["cls"] is None and ln["angle"] == 0]
@@ -8725,7 +9338,8 @@ def main_text(paper_dir, draw=True):
                         and (p["first_column_top"] is None or ln["box"][3] < p["first_column_top"])):
                     furniture(ln, "inside the recurring header band")
                 elif (footer_top is not None and ln["box"][1] >= footer_top - PARAMS["band_tolerance_em"] * ln["size"]
-                      and not column_tail(ln)): furniture(ln, "inside the recurring footer band")
+                      and not column_tail(ln) and (p is not front or front_band_furniture(p, ln))):
+                    furniture(ln, "inside the recurring footer band")
                 elif header_bottom is not None and ln["box"][3] <= header_bottom + PARAMS["band_tolerance_em"] * ln["size"]:
                     p["header_protected"].update(e["id"] for e in ln["runs"])
             if ln["cls"] is None and ln["angle"] != 0: ln["cls"] = "rotated"
@@ -9016,6 +9630,7 @@ def main_text(paper_dir, draw=True):
                 p["d"]["blocks"].append(part.copy())
         p["blocks"] = separated
     split_runin_abstract(front, body)
+    split_labelled_abstract(front, body)
     # title and authors on the first page
     flags = []
     p1 = front; cand = [ln for ln in p1["lines"] if ln["cls"] is None]
@@ -9299,6 +9914,48 @@ def main_text(paper_dir, draw=True):
         for u in p["d"].get("unpaired", []):   # rule 4's caption without its graphic on this page: the float's text, not the body's
             for b in tb:
                 if b["cls"] is None and b["id"] == u.get("block"): b["cls"] = "caption"; b["why"] = "rule 4 caption without its graphic on this page"
+        # A figure caption set in two columns under its picture (lane r4-captionextent): when the caption's
+        # last line ends without closing punctuation, a block in the caption's type (its size within the size
+        # tolerance and its face) whose top is level with the caption's top within one line, beside the
+        # caption to its right and under the same drawing row (the float's drawing spans it), is the
+        # caption's second column: never body text, whatever column it opens. The copier joins it
+        # to the caption (caption_column_tail) as a block out of the flow.
+        # (the rule 1-5 runs: a float's box can hide part of a block from the lines rule 6 reads)
+        el = {e["id"]: e for e in p["d"]["elements"] if e["kind"] == "text"}
+        whole = {b["id"]: b for b in p["d"]["blocks"]}
+        def own_runs(b): return [el[m] for m in whole.get(b["id"], b)["members"] if m in el]
+        def runs_box(es): return [min(e["box_px"][0] for e in es), min(e["box_px"][1] for e in es), max(e["box_px"][2] for e in es), max(e["box_px"][3] for e in es)]
+        def runs_size(es):
+            ss = [rsize(e) for e in es for _ in e["text"].strip()]
+            return statistics.median(ss) if ss else 0
+        for f in p["d"].get("floats", []):
+            fb = [b for b in tb if b["id"] in f.get("blocks", [])]
+            caps = []
+            for b in fb:
+                es = own_runs(b)
+                if not es or any(e["angle"] for e in es): continue
+                top = min(e["line"] for e in es)
+                first = min((e for e in es if e["line"] == top), key=lambda e: e["box_px"][0])
+                if is_caption_run(first) and not re.sub(r"\s+", "", first["text"]).lower().startswith("table"): caps.append((b, es))
+            if len(caps) != 1: continue
+            cb, ces = caps[0]
+            drawn = [b["box_px"] for b in p["d"].get("blocks", []) if b["id"] in f.get("blocks", []) and b["id"] != cb["id"]]
+            if not drawn: continue
+            G = [min(B[0] for B in drawn), min(B[1] for B in drawn), max(B[2] for B in drawn), max(B[3] for B in drawn)]
+            C = runs_box(ces); cs = runs_size(ces)
+            last = max(ces, key=lambda e: (e["line"], e["box_px"][0]))
+            if re.search(r"[.!?][\])\u201d\u2019'\"]*$", last["text"].strip()) or G[3] > C[1]: continue
+            cfaces = collections.Counter(figure_caption_face(e) for e in ces for _ in e["text"].strip())
+            for b in tb:
+                if b["cls"] is not None or b is cb or b["id"] in f.get("blocks", []): continue
+                es = own_runs(b)
+                if not es: continue
+                B = runs_box(es)
+                if any(e["angle"] for e in es) or B[0] <= C[2] or abs(B[1] - C[1]) > cs or abs(runs_size(es) - cs) > tol * cs: continue
+                if not (G[0] - cs <= B[0] and B[2] <= G[2] + cs and G[3] <= B[1]): continue
+                bfaces = collections.Counter(figure_caption_face(e) for e in es for _ in e["text"].strip())
+                if not cfaces or not bfaces or bfaces.most_common(1)[0][0] != cfaces.most_common(1)[0][0]: continue
+                b["cls"] = "other"; b["why"] = "a figure caption's second column, beside a caption that ends open"
         cols = own_columns(p)
         # A references heading and successive numbered entries establish their
         # own column even when no body-size paragraph ever occupied that lane.
@@ -9683,6 +10340,57 @@ def main_text(paper_dir, draw=True):
         tb, ordered, ownership, notes, ownership_splits, retained = sort_main_ownership(
             p['d'], tb, ordered, body, front=p is front)
         splits += ownership_splits
+        # lane r5-wrap: text on both sides of a picture (O32), which way its lines run (O33), doubt (O34).  Across a
+        # picture set inside one measure, each row's left piece is followed by its right piece: the copier reads a
+        # block's rows left to right, so the blocks holding the pieces become one block.  Each side read down is
+        # left to the column order where the picture stands between two columns; elsewhere the place is listed as
+        # doubtful and the printed order is kept.
+        wrap_recs = []
+        wrap_mains = [b for b in tb if b["cls"] == "main"]
+        wrap_block = {m: b for b in wrap_mains for m in b["members"]}
+        wrap_runs = [e for e in p["runs"] if e["id"] in wrap_block]
+        wrap_frame = (max(b["box_px"][2] for b in wrap_mains) - min(b["box_px"][0] for b in wrap_mains)) if wrap_mains else 0
+        for w in wrap_places(wrap_runs, wrap_pictures(p["d"]["elements"], p["d"].get("art", []), p["d"]["floats"], wrap_frame, body), body, tol,
+                                {m: b["id"] for m, b in wrap_block.items()},
+                                [(a[1], z[0]) for a in order_cols for z in order_cols if a[1] < z[0]
+                                 and not any(a[1] <= c[0] and c[1] <= z[0] for c in order_cols)]):
+            def wtext(rs): return " ".join(e["text"].strip() for e in rs)
+            def wtop(rs): return min(e["box_px"][1] for e in rs)
+            direction, vd, va = wrap_direction([(wtext(l), wtext(r), wtop(l)) for l, r in w["rows"]],
+                                               [(wtext(l), wtop(l)) for l in w["left"]], wrap_vocab)
+            B = w["box_px"]; cx = (B[0] + B[2]) / 2
+            wt = min(e["box_px"][1] for l, r in w["rows"] for e in l + r)
+            wb = max(e["box_px"][3] for l, r in w["rows"] for e in l + r)
+            # inside one measure: a main-text line just above or below the wrap runs across the picture's middle
+            measure = any(e["box_px"][0] < cx < e["box_px"][2] and (0 <= wt - e["box_px"][3] <= 2.5 * body or 0 <= e["box_px"][1] - wb <= 2.5 * body)
+                          for e in wrap_runs)
+            left_ids = {e["id"] for l in w["left"] for e in l}
+            piece_ids = left_ids | {e["id"] for r in w["right"] for e in r}
+            S = [b for b in ordered if piece_ids.intersection(b["members"])]
+            wrec = dict(box_px=B, rows=len(w["rows"]), direction=direction, votes=[vd, va],
+                       layout="measure" if measure else "columns", blocks=[b["id"] for b in S], action="none", doubt=None)
+            if direction == "unclear":
+                wrec["doubt"] = ["O34", "wrap_order_unclear"]
+            elif direction == "across" and not measure:
+                wrec["doubt"] = ["O34", "wrap_across_against_columns"]
+            elif direction == "down" and measure:
+                wrec["doubt"] = ["O33", "wrap_down_in_measure_kept"]
+            elif direction == "across" and len(S) > 1:
+                lead = max(S, key=lambda b: len(left_ids.intersection(b["members"])))
+                # every other block holds wrap pieces only, so taking it into the lead block moves no other text
+                if all(set(b["members"]) <= piece_ids for b in S if b is not lead):
+                    members = [m for b in S for m in b["members"]]
+                    merged = dict(lead, id=lead["id"] + ":wrap:1", members=members, main_text_source=lead["id"],
+                                  box_px=hull([b["box_px"] for b in S]), why="wrap: rows read across the picture (O33)")
+                    merged.update(size=bsize(merged, p), lines=blines(merged, p), text=block_text(merged, p))
+                    p["d"]["blocks"].append(dict(id=merged["id"], box_px=merged["box_px"], members=merged["members"],
+                        kinds=["text"], text_lines=merged["lines"], text=merged["text"], main_text_source=lead["id"]))
+                    ordered = [merged if b is lead else b for b in ordered if b is lead or b not in S]
+                    tb = [b for b in tb if b not in S] + [merged]
+                    wrec["action"] = "merged"
+                else:
+                    wrec["doubt"] = ["O33", "wrap_blocks_apart"]
+            wrap_recs.append(wrec)
         for b in ordered: order_n += 1; b["order"] = order_n
         for panel in panels:
             panel["blocks"] = [b["id"] for b in ordered if b["id"] in panel["blocks"]]
@@ -9747,6 +10455,7 @@ def main_text(paper_dir, draw=True):
                            **{k:b[k] for k in ('role','owner','ownership_flags','header_from_body','header_group','header_after','table_header_cell') if k in b}} for b in tb],
                "counts": collections.Counter(b["cls"] for b in tb), "reading_order": [b["id"] for b in ordered], "band_boundaries_y": bounds, "splits": splits, "panels": panels}
         if captioned_lists: rec["captioned_lists"] = captioned_lists
+        if wrap_recs: rec["wraps"] = wrap_recs
         if front_columns: rec['front_columns'] = front_columns
         if abstract_regions: rec['abstract_regions'] = abstract_regions
         rec["ownership"] = ownership
@@ -9796,6 +10505,10 @@ FIELD_ROW = re.compile(r"^[A-Z][A-Za-z'’]*(?:\s+[A-Za-z'’]+){0,4}\s*:\s")
 # The author-list fields of a manuscript cover sheet (Editorial Manager and similar submission systems):
 # "Order of Authors:" is the whole list, "First Author:" its first name. Exactly these labels: the
 # sheet's "Order of Authors Secondary Information:" and "First Author Secondary Information:" are other fields.
+# Round 6 rule A6: the labels that end an author list (the abstract, its keywords, the introduction).
+FRONT_LABEL = re.compile(r"^(?:Abstract|Summary|Key\s*words?|(?:\d+\.?\s+)?Introduction)\b", re.I)
+# Round 6 rule A9: a publication-history (date) line or an "Edited by" line is not an author line.
+DATE_ROW = re.compile(r"^(?:Received|Accepted|Revised|Submitted|Published(?: online)?|Edited by)\b", re.I)
 AUTHOR_FIELD = re.compile(r"^(Order of Authors|First Author)\s*:\s*(.*)$", re.I)
 # A cover sheet's institution field ("Corresponding Author's Institution:"); its value is an affiliation.
 INSTITUTION_FIELD = re.compile(r"^(?:[A-Z][A-Za-z'’]*\s+){0,3}Institution\s*:\s*(.*)$")
@@ -9877,6 +10590,39 @@ def institution_row(text):
     return bool(INSTITUTION_WORD.search(t)) and not GROUP_WORD.search(t) and not GROUP_OPEN.match(t)
 
 
+# Round 6 (lane affiliations), rule A19: a marked line that opens with these words is an author note
+# (correspondence, equal contribution, present address, deceased), tied to its mark and never an
+# affiliation, even when it names an institution. A support or funding statement after a mark is no
+# address either (it is not an author note: it stays where the page puts it).
+AUTHOR_NOTE_OPEN = re.compile(
+    r"^(?:(?:(?:Address(?:es)?|Send|Please\s+address)\s+(?:all\s+)?(?:for\s+)?)?correspond\w*|(?:Reprint requests?|Requests? for reprints)\b|"
+    r"(?:Author|Authors)\s+(?:for|of)\s+correspondence\b|To whom correspondence\b|"
+    r"(?:These|The|Both|All)\b[^.!?]*\bauthors?\b[^.!?]*\b(?:contribute[ds]?|share)\b|(?:[^.!?]|(?<=[A-Z])\.)*\b(?:contribute[ds]?\s+equally|equal(?:ly)?\s+contribut\w+)\b|"
+    r"(?:Current|Present|Permanent|New)\s+address\b|Deceased\b)", re.I)
+SUPPORT_OPEN = re.compile(
+    r"^(?:(?:This|The)\s+(?:work|study|research|project|trial|article|paper)\s+(?:was|is|has been)\s+)?(?:(?:partly|partially|financially|generously)\s+)?"
+    r"(?:supported|funded|sponsored|financed)\s+(?:in\s+part\s+)?by\b|Funding\b|Financial\s+support\b|Grant\s+support\b", re.I)
+E_MAIL = re.compile(r"\bE-?mail\b|[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.I)
+
+
+def symbol_address(body):
+    """Rule A11 with A10 (round 6; first written by lane r4-symboladdr): the text after a byline symbol is an
+    address when it names an institution anywhere in the row (institution_row: "Primary Healthcare Center
+    ...", "Previously, Department of ...", a place before a college name) and is not an author note
+    (AUTHOR_NOTE_OPEN), a support statement or a row giving an e-mail address (a correspondence form printed
+    without its label)."""
+    t = body.strip()
+    return bool(institution_row(t) and not AUTHOR_NOTE_OPEN.match(t) and not SUPPORT_OPEN.match(t) and not E_MAIL.search(t))
+
+
+# Round 6 rule A16: an affiliation ends at a label (a section label opening a printed run) or at a
+# correspondence opening; it never holds a section label or abstract text.
+AFFILIATION_END_LABEL = re.compile(r"(?:Abstract|ABSTRACT|Summary|SUMMARY|Key\s*words|KEY\s*WORDS|Introduction|INTRODUCTION)(?![\w-])")
+AFFILIATION_END_NOTE = re.compile(
+    r"\s[*∗⁎†‡§¶#✉]?\s*(?:(?:(?:Address(?:es)?|Send|Direct|Please\s+(?:address|send|direct))\s+(?:all\s+)?(?:for\s+)?)?"
+    r"(?:Correspond(?:ence|ance|ing authors?)\b|Reprint requests?\b|Requests? for reprints\b)|Full list of author information\b)", re.I)
+
+
 def marked_row_after_marked_byline(above, text):
     """As printed text: a row opening with a digit or note-symbol marker directly before a capital,
     under a byline row that sets such markers directly after its names (anywhere in the row, also
@@ -9903,7 +10649,10 @@ def byline_name_groups(lines):
     each separate row is also a group; a lone given name continues across rows.
     """
     # Names are also separated by a printed middle dot or bullet (AM10 "Laura Benyei1,2 · Anton Friedmann1").
-    groups = re.split(r"[,/;|&\d*∗†‡§¶#·•]+|\band\b", re.sub(r'^by\s+', '', " ".join(lines).strip(), flags=re.I))
+    text = re.sub(r'^by\s+', '', " ".join(lines).strip(), flags=re.I)
+    # Round 6 rule A4: a number in brackets after a name is a marker, like a raised number.
+    text = re.sub(r"\s*[(\[]\d{1,3}(?:\s*,\s*\d{1,3})*[)\]]", ",", text)
+    groups = re.split(r"[,/;|&\d*∗†‡§¶#·•]+|\band\b", text)
     names = []
     for group in groups:
         name = group.strip(" .")
@@ -10270,7 +11019,8 @@ def authors_and_affiliations(pdf_path, paper_dir):
             gap = box[0] - prev["box"][2] if prev is not None else 0
             if digit_pair and chars[prev["char_id"]].get("adv_x1") is not None:
                 gap = c["origin"][0] - chars[prev["char_id"]]["adv_x1"]
-            if prev is not None and (text_space or gap > max(PARAMS["wordspace_min_em"] * max(c["size"], prev["size"]), tracked)) and not accent(t) and not accent(prev["t"]): out.append({"t": " ", "space": True})
+            # (lane r5-line: an accent set after a PDF space glyph, before the letter it stands over, keeps that space)
+            if prev is not None and (text_space or gap > max(PARAMS["wordspace_min_em"] * max(c["size"], prev["size"]), tracked)) and not (accent(t) and not text_space) and not accent(prev["t"]): out.append({"t": " ", "space": True})
             text_space = False
             out.append({"t": t, "size": c["size"], "box": box, "font": c.get("font", ""), "char_id": ids[k - 1], "run": e["id"]})
         return out if k == len(ids) else None
@@ -10592,11 +11342,46 @@ def authors_and_affiliations(pdf_path, paper_dir):
                                           (r["box_px"][1] >= tb[1] or min(bb[2], r["box_px"][2]) - max(bb[0], r["box_px"][0]) <= 0) for r in runs)
             if off or alone: return True
         return False
-    def banner(e, labels=True):
+    def apart_label(e):
+        # Round 6 rule T3: an article label is short and stands above the title. The opening row of
+        # a proposed title of several rows, of one to three words, that shares no width with any
+        # other row of it (a wrapped title's rows always overlap: left-set or centred) and lies
+        # wholly above them is a label set apart, never the title, even in the title's type.
+        if e not in proposed or not 1 <= len(re.findall(r"[^\W\d_]+", e["text"])) <= 3: return False
+        others = [r for r in proposed if r["line"] != e["line"]]
+        if not others or any(r["box_px"][1] < e["box_px"][1] for r in others): return False
+        return all(min(e["box_px"][2], r["box_px"][2]) - max(e["box_px"][0], r["box_px"][0]) <= 0
+                   and e["box_px"][3] <= r["box_px"][1] + 1 for r in others)
+    def single_label(e):
+        # Round 6 rule T6: one word ("Abstract", "Primer", "Editorial", also letter-spaced) is not the
+        # title when a longer block in large type (two words or more, 1.3 body sizes or more, not
+        # recurring at its size on other pages) starts in the top half of the page (rule T1).
+        body = mt.get("body_size_px") or 0
+        tokens = e["text"].split()
+        word = "".join(tokens) if len(tokens) > 1 and all(len(t) == 1 for t in tokens) else e["text"].strip()
+        if not body or e not in proposed or not re.fullmatch(r"[^\W\d_]{3,}", word): return False
+        # only a row standing apart: the opening row of the proposed title, with no row of its own type stacked
+        # directly under it (a wrapped title's last word, "... of Scientific / Perspectives", is title: T4)
+        if any(r["box_px"][1] < e["box_px"][1] - 1 for r in proposed if r["line"] != e["line"]): return False
+        # rule C1: a one-word title confirmed by its own author line directly under it stays the title
+        # (directly under it: no display row of the page, in any column, stands between the word and that line)
+        if followed_by_byline([e], e["run_size_px"], own=True, labels=False, rows=1):
+            under = [r for r in runs if r is not e and r["box_px"][1] >= e["box_px"][3] - 1 and byline_shaped(r)
+                     and min(e["box_px"][2], r["box_px"][2]) - max(e["box_px"][0], r["box_px"][0]) > 0]
+            first = min(under, key=lambda r: r["box_px"][1]) if under else None
+            if first is None or not any(r is not e and e["box_px"][3] - 1 <= r["box_px"][1] < first["box_px"][1]
+                                        and r["run_size_px"] >= 1.3 * body for r in runs): return False
+        if any(r["line"] != e["line"] and font_faces(r) == font_faces(e) and abs(r["run_size_px"] - e["run_size_px"]) <= SIZE_TOL * e["run_size_px"]
+               and -1 <= r["box_px"][1] - e["box_px"][3] <= PARAMS["stack_gap_em"] * e["run_size_px"] for r in proposed): return False
+        return any(r is not e and r["line"] != e["line"] and r not in proposed
+                   and len(re.findall(r"[^\W\d_]+", r["text"])) >= 2 and r["run_size_px"] >= 1.3 * body
+                   and r["box_px"][1] < .5 * p["region_box_px"][3]
+                   and not any(abs(z - r["run_size_px"]) <= SIZE_TOL * r["run_size_px"] for z in recurrences(r["text"])) for r in runs)
+    def banner(e, labels=True, t6=True):
         t = e["text"].strip()
         return (len(normalized(t)) >= 12 and any(abs(size - e["run_size_px"]) <= SIZE_TOL * e["run_size_px"] for size in recurrences(t)) or
                 t.casefold() == 'by' or
-                (labels and article_type(e)) or series_label(e) or
+                (labels and article_type(e)) or series_label(e) or (labels and (apart_label(e) or (t6 and single_label(e)))) or
                 bool(re.fullmatch(r"(?:[\w&.-]+\s+){0,3}Journal of [\w &-]+|[\w .-]*Public Access|Author Manuscript", t, re.I)) or
                 separated_masthead(e) or offaxis_masthead(e))
     proposed = [e for e in trs if e["run_size_px"] >= PARAMS["title_size_share"] * max((r["run_size_px"] for r in trs), default=0)]
@@ -10618,12 +11403,20 @@ def authors_and_affiliations(pdf_path, paper_dir):
         # An article label can share rule 6's title block and type size with the
         # real title. Only the label is rejected in that case.
         # A series label (X09 "ORAL MEDICINE" over its title) is rejected alone, like an article type.
-        label = lambda e: article_type(e) or series_label(e)
-        old_ids = ({e["id"] for e in trs if label(e)} if any(label(e) for e in proposed)
+        label = lambda e: article_type(e) or series_label(e) or apart_label(e)
+        # Rule T6 alone (no other banner reason): only the one-word label leaves the title. It is no
+        # article-information record (memo 1, M2): it and the other rows of its rule-6 block stay for the copy,
+        # which quotes rows it cannot place under its flagged "not placed" block and lists them as doubtful.
+        t6_only = not any(banner(e, t6=False) for e in proposed)
+        old_ids = ({e["id"] for e in trs if single_label(e)} if t6_only else
+                   {e["id"] for e in trs if label(e)} if any(label(e) for e in proposed)
                    else set(title_ids)); trs = []
+        if t6_only: result["t6_label_run_ids"] = sorted(old_ids)
+        # (rule T6: after a one-word label, the longer block in large type may hold two words)
+        min_words = 2 if t6_only else 3
         candidates = [e for e in runs if e["id"] not in old_ids and not banner(e)
                       and e["box_px"][1] < .5 * p["region_box_px"][3]
-                      and len(re.findall(r"[^\W\d_]+", e["text"])) >= 3]
+                      and len(re.findall(r"[^\W\d_]+", e["text"])) >= min_words]
         if candidates:
             size = max(e["run_size_px"] for e in candidates)
             large = sorted([e for e in candidates if e["run_size_px"] >= PARAMS["title_size_share"] * size], key=lambda e: (e["box_px"][1], e["box_px"][0]))
@@ -10635,7 +11428,7 @@ def authors_and_affiliations(pdf_path, paper_dir):
             # The rejected rows of rule 6's title (a series label, a journal masthead,
             # a banner) are printed front matter: article information, never unplaced
             # (AG08 series label; AG10 "Contents lists available at ScienceDirect").
-            for e in sorted((e for e in runs if e["id"] in old_ids and e not in trs and e["text"].strip()),
+            for e in sorted((e for e in runs if e["id"] in old_ids and e not in trs and e["text"].strip() and not t6_only),
                             key=lambda e: (e["box_px"][1], e["box_px"][0])):
                 result.setdefault("article_info", []).append(dict(page=front_page, run_ids=[e["id"]], text=e["text"].strip(),
                                                                   role="series label" if series_label(e) else "rejected title row"))
@@ -10658,6 +11451,25 @@ def authors_and_affiliations(pdf_path, paper_dir):
                if b0["id"] == b["id"] for m in b0["members"]}
     subtitle_start = None
     body = mt.get("body_size_px") or 0
+    title_faces = {f for e in trs if abs(e["run_size_px"] - big) <= SIZE_TOL * big for f in font_faces(e)}
+    def subtitle_block(row, size):
+        # Round 6 rule T7: a display row under the title that reads as names is still a subtitle when
+        # its own block (the rows stacked under it in its type) is no series of names (a row of figures
+        # alone, such as a span of years: rule A2, no digits in a name) and a smaller row that reads as
+        # names stands under that block, inside the author gap (rule A1: the authors under the subtitle).
+        faces = {f for e in row for f in font_faces(e)}
+        same = lambda r: abs(r["run_size_px"] - size) <= SIZE_TOL * size and font_faces(r) and font_faces(r) <= faces
+        block = list(row); x0 = min(e["box_px"][0] for e in row); x1 = max(e["box_px"][2] for e in row)
+        for r in sorted(runs, key=lambda r: (r["box_px"][1], r["box_px"][0])):
+            if (r not in block and r["id"] not in title_ids and same(r) and min(x1, r["box_px"][2]) - max(x0, r["box_px"][0]) > 0
+                    and 0 <= r["box_px"][1] - max(b["box_px"][3] for b in block) <= PARAMS["stack_gap_em"] * size):
+                block.append(r)
+        figures = any(re.search(r"\d", r["text"]) and not re.search(r"[^\W\d_]{2,}", r["text"]) for r in block if r not in row)
+        if not figures: return False
+        bottom = max(b["box_px"][3] for b in block)
+        return any(r not in block and r["id"] not in title_ids and bottom < r["box_px"][1] <= bottom + AUTHOR_GAP_EM * r["run_size_px"]
+                   and r["run_size_px"] < (1 - SIZE_TOL) * size and min(x1, r["box_px"][2]) - max(x0, r["box_px"][0]) > 0
+                   and byline_shaped(r) for r in runs)
     while body:
         below_title = [e for e in runs if e["id"] not in title_ids and e["box_px"][1] >= ty1 - 1
                        and min(tx1, e["box_px"][2]) - max(tx0, e["box_px"][0]) >=
@@ -10670,12 +11482,20 @@ def authors_and_affiliations(pdf_path, paper_dir):
               max(e["box_px"][2] for e in row), max(e["box_px"][3] for e in row)]
         aligned_title = abs(bx[0] - tx0) <= .5 * big or abs((bx[0] + bx[2] - tx0 - tx1) / 2) <= .5 * big
         continuation = abs(size-big) <= SIZE_TOL*big and bx[1]-ty1 <= PARAMS['stack_gap_em']*size
+        # Round 6 rules T4/T5: a directly stacked row in the title's exact type (its faces and its
+        # size) is title, never an author line, even when its words read as names (a wrapped
+        # title's last words: "... in Vitro Study of" over two capitalised words).
+        title_type = continuation and all(font_faces(e) and font_faces(e) <= title_faces
+                                          and abs(e["run_size_px"] - big) <= SIZE_TOL * big for e in row)
+        # (a cover form can set its names in the title's type; a row holding a personal initial, "J.", is names)
+        if title_type and any(re.search(r"(?<![\w.])[A-Z]\.(?=[\s\-A-Z]|$)", e["text"]) for e in row): title_type = False
         if (not (body * (1 + SIZE_TOL) < size <= big * (1 + SIZE_TOL)) or
             bx[1] - ty1 > PARAMS["stack_gap_em"] * size or not aligned_title or
             # Re-ladder (2026-11-05): an article-type word is a label only as a title's
             # opening row; a continuation row (the title's size, directly stacked, aligned)
             # reading "review" is the wrapped title's last word (AS14), whatever its count of words.
-            any((classes.get(e["id"]) == "main" and not continuation) or banner(e, labels=not continuation) or name_run(e) or
+            any((classes.get(e["id"]) == "main" and not continuation) or banner(e, labels=not continuation) or
+                (name_run(e) and not title_type and not subtitle_block(row, size)) or
                 INSTITUTION.match(e["text"].strip()) or GROUP_OPEN.match(e["text"].strip()) for e in row)):
             break
         if subtitle_start is None and size < PARAMS["title_size_share"] * big:
@@ -10792,7 +11612,7 @@ def authors_and_affiliations(pdf_path, paper_dir):
     def lsize(li):
         cs = [c for e in by_line[li] if e["id"] not in attached for c in aligned[e["id"]] if not c.get("space") and not c.get("sup")]
         return statistics.median(c["size"] for c in cs) if cs else 0
-    alines = []; sup_lines = []; field_rows = []
+    alines = []; sup_lines = []; field_rows = []; released = []
     for li in order:
         top = min(e["box_px"][1] for e in by_line[li]); s = lsize(li)
         if not alines:
@@ -10803,8 +11623,14 @@ def authors_and_affiliations(pdf_path, paper_dir):
             name_line = bool(words) and all(w[0].isupper() or w.lower() in PARTICLES or w == "and" for w in words)
             known_band = name_line and any(e["id"] in author_ids for e in by_line[li])
             if s <= 0 or not detached_byline and top - ty1 > AUTHOR_GAP_EM * (max(s, big) if known_band else s): break
+            if FRONT_LABEL.match(line_text.strip()) or DATE_ROW.match(line_text.strip()):
+                # round 6 rules A6 and A9: a front label or a date or "Edited by" line is never an author row; its
+                # runs are recorded as released, so the copy keeps them printed (memo 1: nothing is lost)
+                released.extend(e["id"] for e in by_line[li]); break
             alines.append(li); s0 = s; last = max(e["box_px"][3] for e in by_line[li]); continue
         row_text = " ".join(e["text"] for e in sorted(by_line[li], key=lambda e: e["box_px"][0]))
+        if FRONT_LABEL.match(row_text.strip()):   # round 6 rule A6: the author list ends at a label such as "Abstract"
+            released.extend(e["id"] for e in by_line[li]); break
         # A form sheet (a submission cover page: rows "Short Title: ...", "Corresponding Author: ...")
         # is no byline of names; the address-row tests below do not cut it, only an institution
         # opening ends it, as before.
@@ -10854,6 +11680,17 @@ def authors_and_affiliations(pdf_path, paper_dir):
             break
         if top - last > AUTHOR_STACK_EM * s0: break
         alines.append(li); last = max(e["box_px"][3] for e in by_line[li])
+    a9_cleared = False
+    if alines:
+        # Round 6 rule A9: a reference entry is not an author line. Rows under the title that carry a year and a
+        # journal's volume and pages ("2005; 32 (Suppl. 6): 7-15", "2010;141;647-655") are the article's own
+        # citation; the author line is then looked for beside or above the title.
+        cited = " ".join(e["text"] for li in alines for e in sorted(by_line[li], key=lambda e: e["box_px"][0]))
+        # (a reference entry: at most three rows, opening with a surname and initials, "Marsh PD.", "Smith AB,")
+        if (len(alines) <= 3 and re.match(r"[A-Z][\w'’\-]+(?:\s+[A-Z][\w'’\-]+)?\s+[A-Z]{1,3}[.,](?:\s|$)", cited)
+                and re.search(r"\b(?:19|20)\d{2}\b\s*[;,]\s*\d+\s*(?:\([^)]{1,20}\)\s*)?[:;(]\s*[\dA-Z]", cited)):
+            released.extend(e["id"] for li in alines for e in by_line[li])
+            alines = []; sup_lines = []; a9_cleared = True
     a_bottom = max(e["box_px"][3] for e in by_line[alines[-1]]) if alines else 0
     sup_lines = [li for li in sup_lines if min(e["box_px"][1] for e in by_line[li]) <= a_bottom]   # beside an author line, not under the last
     for li in sup_lines:   # its runs join the author line nearest it, as superscripts
@@ -10869,21 +11706,51 @@ def authors_and_affiliations(pdf_path, paper_dir):
     # takes precedence over a tail-only selection or a citation under the title.
     # When rule 6 combined names and addresses, require both a name opening near
     # the title's top and a subsequent institution, then stop at the size change.
-    side = []
+    side = []; side_rest = []; side_text = []
     for b in p["blocks"]:
         bx = b["box_px"]
         if not ((bx[2] < tx0 or bx[0] > tx1) and min(bx[3], ty1) > max(bx[1], ty0)): continue
         mem = sorted([e for e in runs if e["id"] in b["members"] and e["id"] not in title_ids and e["id"] not in attached], key=lambda e: (e["box_px"][1], e["box_px"][0]))
         if not mem: continue
         known = any(e["id"] in author_ids for e in mem)
-        if not known and not (abs(mem[0]["box_px"][1] - ty0) <= big and name_run(mem[0]) and
-                             any(INSTITUTION.match(re.sub(r"^[\d\s]+", "", e["text"])) for e in mem[1:])): continue
+        # (round 6 rule A1, beside the title: the institution may also be named inside the next rows, "Leeds Dental
+        # Institute, ...", when the beside block opens with the name in a type of its own)
+        old_side = known or (abs(mem[0]["box_px"][1] - ty0) <= big and name_run(mem[0]) and
+                             any(INSTITUTION.match(re.sub(r"^[\d\s]+", "", e["text"])) for e in mem[1:]))
+        new_side = (not old_side and not alines and abs(mem[0]["box_px"][1] - ty0) <= big and name_run(mem[0]) and
+                    len(mem) > 1 and font_faces(mem[0]) != font_faces(mem[1]) and
+                    any(INSTITUTION_WORD.search(e["text"]) for e in mem[1:3]))
+        if not (old_side or new_side): continue
         size = mem[0]["run_size_px"]; band = []
         for e in mem:
             if (abs(e["run_size_px"] - size) > SIZE_TOL * size or
                 INSTITUTION.match(re.sub(r"^[\d\s]+", "", e["text"])) or
+                # (round 6 rule A2: a row naming an institution is no row of names; in a beside block found by rule A1)
+                (new_side or a9_cleared) and band and INSTITUTION_WORD.search(e["text"]) or
                 (band and e["box_px"][1] - max(r["box_px"][3] for r in band) > AUTHOR_STACK_EM * size)): break
             band.append(e)
+        if band and (new_side or a9_cleared):
+            # (memo 1, M1) the rows stacked under the names in the beside block name the authors' institution: they
+            # are the unmarked affiliation, so they stay printed (never left out of the copy text)
+            bottom = max(r["box_px"][3] for r in band)
+            # Read by printed rows, not runs (memo 2): a row can be cut into runs where its first letters fall on
+            # the title's line ("Wes" + "tmoor Oral Health Institute,"); touching runs join without a space.
+            rest_rows = []
+            for e in mem[len(band):]:
+                h = e["box_px"][3] - e["box_px"][1]
+                row = next((r for r in rest_rows if min(r[-1]["box_px"][3], e["box_px"][3]) - max(r[-1]["box_px"][1], e["box_px"][1]) >= .5 * h), None)
+                if row is None: rest_rows.append([e])
+                else: row.append(e)
+            for row in rest_rows:
+                row.sort(key=lambda r: r["box_px"][0])
+                text = row[0]["text"].strip()
+                for a_, b_ in zip(row, row[1:]):
+                    text += ("" if b_["box_px"][0] - a_["box_px"][2] <= .15 * b_["run_size_px"] else " ") + b_["text"].strip()
+                # (the first row names the institution; the rows after it continue it in its own type)
+                cont = side_rest and font_faces(row[-1]) == font_faces(side_rest[0]) and abs(row[-1]["run_size_px"] - side_rest[0]["run_size_px"]) <= SIZE_TOL * side_rest[0]["run_size_px"]
+                if (min(r["box_px"][1] for r in row) - bottom > AUTHOR_STACK_EM * row[0]["run_size_px"] or FRONT_LABEL.match(text)
+                        or not cont and not INSTITUTION_WORD.search(text)): break
+                side_rest.extend(row); side_text.append(text); bottom = max(bottom, max(r["box_px"][3] for r in row))
         if band:
             side += band
             # The shared rule 1 line may be sized for the title across the gutter.
@@ -10898,7 +11765,28 @@ def authors_and_affiliations(pdf_path, paper_dir):
         s0 = statistics.median(lsize(li) for li in alines); sidebar = True
         flags.append("authors read from a sidebar beside the title")
     if not alines:
+        # Round 6 rule A1: under the title first, then beside it, then above it. With nothing under or
+        # beside the title, the row directly above it (inside the author gap of its own letter heights,
+        # in the title's column, in smaller type: rule A3) is the author line when it reads as names
+        # and does not come back on other pages (a running head "Smith et al." does).
+        over = [e for e in runs if e["id"] not in title_ids and e["box_px"][3] <= ty0 + 1 and in_column(e)
+                and ty0 - e["box_px"][3] <= AUTHOR_GAP_EM * e["run_size_px"] and e["run_size_px"] < (1 - SIZE_TOL) * big]
+        if over:
+            nearest = max(over, key=lambda e: e["box_px"][3])
+            row = [e for e in over if e["line"] == nearest["line"]]
+            text = " ".join(e["text"] for e in sorted(row, key=lambda e: e["box_px"][0]))
+            if (all(byline_shaped(e) and not banner(e) for e in row) and not recurrences(text)
+                    and not any(recurrences(e["text"]) for e in row)):
+                by_line = collections.defaultdict(list)
+                for e in row + [r for r in runs if r["id"] in attached and attached[r["id"]] in row]: by_line[nearest["line"]].append(e)
+                alines = [nearest["line"]]; s0 = lsize(nearest["line"])
+                flags.append("authors read from the row above the title")
+    if not alines:
         flags.append("no author line under the title"); result["checks"] = {"title_found": True, "authors_found": 0}
+        if released: result["released_run_ids"] = sorted(set(released))
+        # (memo 2) when rule A9 took the reference entry away and nothing else stands in the author place, the title's
+        # rows are recorded, so the copy places the other rows of the title's rule-6 block as before, never drops them
+        if a9_cleared: result["title_run_ids"] = [e["id"] for e in trs]
         write_json(os.path.join(paper_dir, "authors.json"), result, indent=1, ensure_ascii=False); return result
     # A short title does not bound the byline's width. Separators can be drawn bars,
     # leaving arbitrarily many independent name runs beyond rule 6's author band.
@@ -11235,9 +12123,14 @@ def authors_and_affiliations(pdf_path, paper_dir):
         nonlocal marker_buf
         for m in re.split(r"[,\s]+", marker_buf):
             if not m: continue
-            if all(ch in NOTE_SYMBOLS or is_private(ch) for ch in m): cur["notes"].append("envelope" if is_private(m) else m)
+            if all(ch in NOTE_SYMBOLS or is_private(ch) for ch in m):
+                # Round 6 rules A11 and A12: symbols set together after a name are one mark per symbol in the
+                # usual order ("†‡" is † and ‡; "††‡‡" is †† and ‡‡); a repeated symbol is one mark ("**").
+                for part in (x.group(0) for x in re.finditer(r"(.)\1*", m)):
+                    cur["notes"].append("envelope" if is_private(part) else part)
             else:
-                for part in re.findall(r"\d+|[a-z]|[^\w\s]", m):
+                # (memo 1 M6: a sign repeated is one mark of that count, "‖‖" is not two "‖")
+                for part in (x.group(0) for x in re.finditer(r"\d+|[a-z]|([^\w\s])\1*", m)):
                     if part in NOTE_SYMBOLS: cur["notes"].append(part)
                     elif is_private(part): cur["notes"].append("envelope")
                     else: cur["markers"].append(part)
@@ -11261,15 +12154,29 @@ def authors_and_affiliations(pdf_path, paper_dir):
             flush_marker()
             if cur["name"].strip() and (cur["markers"] or cur["notes"] or cur["orcid"] or one_per_row or (sidebar or separator_free) and name_ok(cur["name"].strip())): finish()
         if c.get("space"):
+            # (round 6, memo 2 M6: unread signs repeated with a space between them are one mark of that count)
+            nx = next((q for q in stream[k + 1:] if not q.get("space")), None)
+            if marker_buf.endswith("\ufffd") and nx is not None and nx.get("t") == "\ufffd":
+                k += 1; continue
             if marker_buf: flush_marker()
             cur["name"] += " " if cur["name"] and not cur["name"].endswith(" ") else ""
             k += 1; continue
         t = c["t"]
+        # Round 6 rule A4: a number in brackets after a plausible name ("Name (1), Name (2)") is a
+        # marker, like a raised number; the brackets are not part of the name.
+        if t in "([" and name_ok(cur["name"].strip()):
+            j = k + 1; digits = ""
+            while j < len(stream) and not stream[j].get("space") and (stream[j].get("t", "").isdigit() or (digits and stream[j].get("t") == ",")):
+                digits += stream[j]["t"]; j += 1
+            if digits[:1].isdigit() and len(digits) <= 7 and j < len(stream) and stream[j].get("t") == (")" if t == "(" else "]"):
+                marker_buf += digits.rstrip(","); k = j + 1; continue
         # Baseline digits are markers only after a plausible personal name. Digits
         # in a group name, DOI, citation or misidentified prose must remain text.
         baseline_marker = t.isdigit() and (marker_buf.isdigit() or name_ok(cur["name"].strip()) or
                                            (authors and degree_suffix(cur["name"].strip())))
-        if c.get("sup") or baseline_marker or (t in NOTE_SYMBOLS or is_private(t)):
+        # (round 6, memo 1 M6: a sign the text layer cannot read, set directly after a plausible name, is a mark too)
+        unread_mark = t == "\ufffd" and (marker_buf or name_ok(cur["name"].strip()))
+        if c.get("sup") or baseline_marker or (t in NOTE_SYMBOLS or is_private(t)) or unread_mark:
             if not cur["name"].strip(): cur["prefix_markers"] = True
             marker_buf += t; k += 1; continue
         jd = k + 1
@@ -11325,10 +12232,24 @@ def authors_and_affiliations(pdf_path, paper_dir):
     # Repeated symbols (*, **, ***) are distinct labels; a label's characters are its symbols.
     symbols = {m for a in authors for m in a["notes"] if m and all(ch in NOTE_SYMBOLS for ch in m)}
     symbol_chars = set("".join(symbols))
+    # Round 6 rule A11 (A20): a mark the byline sets after a name that is neither a letter, a digit nor a note
+    # symbol is an unread sign (a sign-font glyph coded as "{"); the same code opening an address row pairs
+    # with it like a symbol.
+    # A sign set directly before a letter label on a name ("¤a", "¤b": one mark of the form sign-and-letter) is not
+    # such a mark.
+    # (memo 1 M4: a dash or a punctuation mark is never such a mark)
+    symbol_chars |= {ch for a in authors + gauthors for k, m in enumerate(a["markers"]) for ch in m
+                     if not ch.isalnum() and not ch.isspace() and ch not in ",;.:/()[]'\"" and unicodedata.category(ch) != "Pd"
+                     and not (k + 1 < len(a["markers"]) and re.fullmatch(r"[a-z]", a["markers"][k + 1]))}
     named_markers = {m for a in authors if a["name_ok"] for m in a["markers"] + a["notes"]}
     taken = title_ids | {e["id"] for li in alines for e in by_line[li]}
-    affs = {}; cands = {}; note_defs = {}; note_runs = {}; unmarked_prefixes = []
-    def small(e): return len(e["text"].strip()) <= 3 and e["text"].strip().isalnum()
+    affs = {}; cands = {}; note_defs = {}; note_runs = {}; unmarked_prefixes = []; symbol_rest = []; cut_rest = set(); note_forms = {}
+    run_box = {e["id"]: e["box_px"] for e in runs}
+    # a marker set as a run of its own: up to three letters or digits, or (round 6, memo 1 M6) up to three of the
+    # signs the byline sets as marks (an unread sign in a font of its own)
+    def small(e):
+        t = e["text"].strip()
+        return len(t) <= 3 and (t.isalnum() or (bool(t) and all(ch in symbol_chars and ch not in NOTE_SYMBOLS for ch in t)))
     block_of = {m: b["id"] for b in p["blocks"] for m in b["members"]}
     for b in p["blocks"]:   # a marker set as a block of its own: its runs join the block of the run directly right of it
         mem = [e for e in runs if e["id"] in set(b["members"])]
@@ -11472,6 +12393,11 @@ def authors_and_affiliations(pdf_path, paper_dir):
                     unmarked_prefixes.append(({"marker": "0", "text": re.sub(r"\s+", " ", text).strip(" ,;"),
                                                "block": bid, "institution_word": True,
                                                "box_px": [min(q[0] for q in bx), min(q[1] for q in bx), max(q[2] for q in bx), max(q[3] for q in bx)]}, ms))
+            # Round 6 rule A16, a gap (memo 1): a step between printed rows clearly wider than the block's usual one
+            # (its median row gap plus a third of the type size); rows set at an even pitch never part
+            order = [r for r in dict.fromkeys(x for x in at_run if x) if r in run_box]
+            steps = sorted(g for g in (run_box[b][1] - run_box[a][3] for a, b in zip(order, order[1:])) if g > 0)
+            gap_limit = (steps[(len(steps) - 1) // 2] if steps else 0) + .35 * ms
             for i, (pos, m) in enumerate(marks):
                 # labels of one compound set share one position and one address
                 end = next((q for q, _ in marks[i + 1:] if q > pos), len(text))
@@ -11480,8 +12406,24 @@ def authors_and_affiliations(pdf_path, paper_dir):
                 # A correspondence note or the pointer to the full author list under a
                 # note is not part of it (a "*Correspondence:" row whose star the byline
                 # does not use, measured on a mimic page, out-front9/mimic).
-                following = re.search(r"\s[*∗⁎†‡§¶#✉]?\s*(?:Correspond(?:ence|ing authors?)\b|Full list of author information\b)", text[pos:end], re.I)
+                # Round 6 rule A16: also at "Address all correspondence ..." and a reprint request.
+                following = AFFILIATION_END_NOTE.search(text[pos:end])
                 if following and following.start() > 0: end = pos + following.start()
+                # Round 6 rule A16: the affiliation ends at a printed run that opens with a section label
+                # ("Abstract", "SUMMARY", "Key words") or that stands a blank line (one type size) below the
+                # run before it: abstract text under the addresses is never part of the last one.
+                # (memo 1: the gap is measured between the printed rows' run boxes, never between glyph boxes: a
+                # line-end hyphen or dash has a glyph box far above its row's foot)
+                prev_run = None
+                for q in range(pos, end):
+                    r = at_run[q]
+                    if r is None or at[q] is None: continue
+                    if prev_run is not None and r != prev_run and q > pos and r in run_box and prev_run in run_box and (
+                            AFFILIATION_END_LABEL.match(text, q) or run_box[r][1] - run_box[prev_run][3] > gap_limit):
+                        # the runs left out are recorded: the copy keeps them printed (rule C3, never dropped)
+                        cut_rest.update(x for x in at_run[q:end] if x and x not in set(at_run[pos:q]) | set(at_run[end:]))
+                        end = q; break
+                    prev_run = r
                 body = re.sub(r"\s+", " ", text[pos:end]).strip(" ,;")
                 # The conjunction before the next marked address is not part of this one (AL05 "..., USA, and bDepartment").
                 if i + 1 < len(marks): body = re.sub(r"[,;\s]+and$", "", body)
@@ -11497,6 +12439,12 @@ def authors_and_affiliations(pdf_path, paper_dir):
                         note_defs[m] = body
                         note_runs[m] = list(dict.fromkeys(r for r in mark_runs.get((pos, m), []) + at_run[pos:end] if r))
                     continue
+                if m in symbols and (AUTHOR_NOTE_OPEN.match(body) or SUPPORT_OPEN.match(body)):
+                    # Round 6 rule A19: after a byline symbol, a line opening with author-note words (correspondence,
+                    # present address, deceased, a contribution or support statement) is that mark's author note,
+                    # never its affiliation; recorded apart (the copy prints such lines where it did before)
+                    note_forms.setdefault(m, body)
+                    continue
                 # A symbol label is an address when its text opens with an institution, or when it
                 # continues a list of addresses: the address before it in the same text ends with
                 # "and" or a semicolon ("..., Malmö and †The ... Council, Stockholm, Sweden").
@@ -11507,10 +12455,23 @@ def authors_and_affiliations(pdf_path, paper_dir):
                 # A number-led institution phrase ("1st Faculty of ...", "2nd Department of ...") opens
                 # an institution too.
                 lead_body = re.sub(r"^\d+\s?(?:st|nd|rd|th)?\s+", "", body) if NUMBER_LED.match(body) else body
-                if m in symbols and not (INSTITUTION.match(lead_body) or address_open.match(body) or continues): continue
                 bx = [q for q in at[pos:end] if q]
+                # Round 6 rules A10 and A11: a symbol address may name its institution anywhere in the row.
+                if m in symbols and not (INSTITUTION.match(lead_body) or address_open.match(body) or continues or symbol_address(lead_body)):
+                    if bx: symbol_rest.append((m, body, b["id"], body_column or heading_size,
+                                               [min(q[0] for q in bx), min(q[1] for q in bx), max(q[2] for q in bx), max(q[3] for q in bx)]))
+                    continue
                 cands.setdefault(m, []).append({"marker": m, "text": body, "block": b["id"], "institution_word": bool(INSTITUTION.match(body)), "_body_column": body_column or heading_size,
                                                 "box_px": [min(q[0] for q in bx), min(q[1] for q in bx), max(q[2] for q in bx), max(q[3] for q in bx)] if bx else None})
+        # Round 6 rule A11 (the mark pairs): a byline symbol with no address yet pairs with the text after the
+        # same symbol inside a block that already holds another mark's address (the address band or the
+        # footnote of addresses), when that text is no author note, no support statement and no e-mail row,
+        # and opens with a capital ("**Royal Brompton and Harefield NHS Trust" between two addresses).
+        address_blocks = {c["block"] for cs in cands.values() for c in cs if not c["_body_column"]}
+        for m, body, bid, column, box in symbol_rest:
+            if (m in cands or column or bid not in address_blocks or not body[:1].isupper() or len(body.split()) < 2
+                    or AUTHOR_NOTE_OPEN.match(body) or SUPPORT_OPEN.match(body) or E_MAIL.search(body)): continue
+            cands[m] = [{"marker": m, "text": body, "block": bid, "institution_word": False, "_body_column": False, "box_px": box}]
         for m, cs in cands.items():   # one per marker: the first whose text opens with an institution word, else the first
             # Keep the existing ambiguity diagnostic for all texts following a code,
             # but a body-column citation is never eligible to supply its address.
@@ -11692,7 +12653,9 @@ def authors_and_affiliations(pdf_path, paper_dir):
                     members.append(e); bottom = max(bottom, e["box_px"][3])
                 if not members: continue
                 addresses, rows_read = panel_addresses(later, members, byline_names)
-                if set(addresses) != set(used) or any(len(a["text"].split()) < 3 for a in addresses.values()): continue
+                # (round 6 rule A14: a panel address may be a place alone, "City, Country")
+                if set(addresses) != set(used) or any(len(a["text"].split()) < 3 and not re.fullmatch(r"[A-Z][\w’'.-]+,\s+[A-Z][\w’'.-]+\.?", a["text"])
+                                                      for a in addresses.values()): continue
                 run_ids = [label["id"]] + [e["id"] for e in members]
                 for a in addresses.values(): a.pop("_runs", None)
                 affs.update(addresses)
@@ -11725,7 +12688,10 @@ def authors_and_affiliations(pdf_path, paper_dir):
         for m in list(a["notes"]):
             if m in affs: a["markers"].append(m); a["notes"].remove(m)
     used = sorted({m for a in authors + gauthors for m in a["markers"]}, key=lambda m: (len(m), m))
-    result["affiliations"] = [affs[m] for m in sorted(affs, key=lambda m: (len(m), m))]
+    # Round 6 rule A12: the affiliations run in mark order: 1, 2, 3 or a, b, c, and note symbols in their usual order
+    # (* † ‡ § ‖ ¶ #, then doubled), not in character-code order.
+    symbol_rank = {ch: 0x2020 + k for k, ch in enumerate("†‡§‖¶#")}
+    result["affiliations"] = [affs[m] for m in sorted(affs, key=lambda m: (len(m), symbol_rank.get(m[:1], ord(m[:1]) if m else 0), m))]
     if marker_glyphs:
         result["affiliations"].sort(key=lambda a: (a["box_px"][1], a["box_px"][0]))
     def hull(bs):
@@ -11792,7 +12758,14 @@ def authors_and_affiliations(pdf_path, paper_dir):
         if address:
             result["unmarked_affiliation_candidates"] = [{"block": block_of.get(address[0]["id"]), "text": " ".join(e["text"] for e in address), "box_px": hull([e["box_px"] for e in address]), "run_ids": [e["id"] for e in address]}]
             result["affiliation_box_px"] = result["unmarked_affiliation_candidates"][0]["box_px"]
+    if side_rest and not result.get("affiliations") and not result.get("unmarked_affiliation_candidates"):
+        result["unmarked_affiliation_candidates"] = [{"block": block_of.get(side_rest[0]["id"]), "text": " ".join(side_text),
+                                                      "box_px": hull([e["box_px"] for e in side_rest]), "run_ids": [e["id"] for e in side_rest]}]
+        result["affiliation_box_px"] = result["unmarked_affiliation_candidates"][0]["box_px"]
+    released += sorted(cut_rest)   # round 6 rule A16: rows cut from the end of an affiliation
+    if released: result["released_run_ids"] = sorted(set(released))
     if note_defs: result["author_notes"] = [{"marker": m, "text": t, "page": front_page, "run_ids": note_runs.get(m, [])} for m, t in note_defs.items()]
+    if note_forms: result["author_note_marks"] = sorted(m for m in note_forms if m not in note_defs)   # round 6 rule A19
     result["title_run_ids"] = [e["id"] for e in trs]
     # Keep the evidence even when parsing fails. The copy can quote every row
     # under a flag without trusting the author parser's ownership decision.
@@ -12768,10 +13741,18 @@ def sc_page_run(a, page, out, summary_only=False):
         _, part = load_float(a.map, a.label, page); label = a.label
     else:   # whole page: the region is the page itself, no caption box from the mapper
         part = {"page": page, "box_px": sc_page_box_px(a.pdf, page), "caption_boxes_px": []}; label = f"page {page}"
+    R5_BASE.clear()
     res = box_elements(a.pdf, part, label, out_prefix=out)
     fp = res.pop("first_pass_result", None)
     sc_font_metadata(res, pdf_path=a.pdf)
     write_json(out + ".json", res, indent=1)
+    if page == 1 and page in R5_BASE:
+        # lane r5-line: the first page as built without the lane, for tools/r5_frontcheck.py (title and front matter)
+        base = R5_BASE[page]
+        for k in ("pass", "art", "order", "first_pass"):
+            if k in res: base[k] = res[k]
+        sc_font_metadata(base, pdf_path=a.pdf)
+        write_json(os.path.join(os.path.dirname(out), "r5base-page-01.json"), base, indent=1)
     if fp is not None: res["first_pass_result"] = fp
     if "error" in res: print(res); return 1
     k = res["counts"]
